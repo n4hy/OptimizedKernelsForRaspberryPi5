@@ -2,7 +2,8 @@
 #include <vector>
 #include <cmath>
 #include <cassert>
-#include "optmath/core.hpp"
+#include <Eigen/Dense>
+#include "optmath/neon_kernels.hpp"
 
 // Simple test runner
 #define ASSERT_EQ(a, b) \
@@ -18,21 +19,17 @@
     }
 
 int main() {
-    optmath::Core core;
-    if (!core.verify_eigen()) return 1;
+    // Basic NEON add test (wrappers fall back to CPU if NEON disabled)
+    Eigen::VectorXf a(3); a << 1.0f, 2.0f, 3.0f;
+    Eigen::VectorXf b(3); b << 4.0f, 5.0f, 6.0f;
 
-    std::vector<float> x = {1.0f, 2.0f, 3.0f};
-    std::vector<float> y = {4.0f, 5.0f, 6.0f};
-    float a = 2.0f;
+    Eigen::VectorXf c = optmath::neon::neon_add(a, b);
 
-    // 2*[1,2,3] + [4,5,6] = [2,4,6] + [4,5,6] = [6,9,12]
-    auto res = core.saxpy(a, x, y);
+    ASSERT_EQ(c.size(), 3);
+    ASSERT_NEAR(c[0], 5.0f, 1e-5f);
+    ASSERT_NEAR(c[1], 7.0f, 1e-5f);
+    ASSERT_NEAR(c[2], 9.0f, 1e-5f);
 
-    ASSERT_EQ(res.size(), 3);
-    ASSERT_NEAR(res[0], 6.0f, 1e-5f);
-    ASSERT_NEAR(res[1], 9.0f, 1e-5f);
-    ASSERT_NEAR(res[2], 12.0f, 1e-5f);
-
-    std::cout << "Core tests passed.\n";
+    std::cout << "Tests passed.\n";
     return 0;
 }

@@ -1,6 +1,5 @@
 # Sources
 set(SOURCES
-    core/core.cpp
     neon/neon_kernels.cpp
     vulkan/vulkan_backend.cpp
 )
@@ -9,25 +8,40 @@ if(ENABLE_VULKAN)
     # Shader compilation logic
     find_program(GLSLANG_VALIDATOR glslangValidator)
     if(GLSLANG_VALIDATOR)
-        set(SHADER_SOURCE vulkan/shaders/simple.comp.glsl)
-        set(SHADER_SPV ${CMAKE_CURRENT_BINARY_DIR}/simple.comp.spv)
+        # Define shaders to compile
+        set(SHADERS
+            vec_add.comp.glsl
+            vec_mul.comp.glsl
+            vec_dot.comp.glsl
+            conv1d.comp.glsl
+        )
+
+        set(SPV_OUTPUTS "")
 
         # Create the directory for the output file
         file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
-        add_custom_command(
-            OUTPUT ${SHADER_SPV}
-            COMMAND ${GLSLANG_VALIDATOR} -V ${CMAKE_CURRENT_SOURCE_DIR}/${SHADER_SOURCE} -o ${SHADER_SPV}
-            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${SHADER_SOURCE}
-            COMMENT "Compiling ${SHADER_SOURCE} to SPIR-V"
-        )
+        foreach(SHADER ${SHADERS})
+             set(SOURCE_FILE ${CMAKE_CURRENT_SOURCE_DIR}/vulkan/shaders/${SHADER})
+             set(OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/${SHADER})
+             string(REPLACE ".glsl" ".spv" OUTPUT_FILE ${OUTPUT_FILE}) # e.g. vec_add.comp.spv
+
+             list(APPEND SPV_OUTPUTS ${OUTPUT_FILE})
+
+             add_custom_command(
+                OUTPUT ${OUTPUT_FILE}
+                COMMAND ${GLSLANG_VALIDATOR} -V ${SOURCE_FILE} -o ${OUTPUT_FILE}
+                DEPENDS ${SOURCE_FILE}
+                COMMENT "Compiling ${SHADER} to SPIR-V"
+            )
+        endforeach()
 
         # We create a custom target to ensure shaders are built.
-        add_custom_target(optmath_shaders ALL DEPENDS ${SHADER_SPV})
+        add_custom_target(optmath_shaders ALL DEPENDS ${SPV_OUTPUTS})
 
-        # In a real app, you might want to embed this SPV into the binary or install it.
-        # Here we will install it to share/optmathkernels/shaders
-        install(FILES ${SHADER_SPV} DESTINATION ${CMAKE_INSTALL_DATADIR}/optmathkernels/shaders)
+        # Install shaders to a known location (datadir/optmathkernels/shaders)
+        # And also copy them to the binary directory of the example app for easy finding
+        install(FILES ${SPV_OUTPUTS} DESTINATION ${CMAKE_INSTALL_DATADIR}/optmathkernels/shaders)
 
     else()
         message(WARNING "glslangValidator not found. Shaders will not be compiled.")
