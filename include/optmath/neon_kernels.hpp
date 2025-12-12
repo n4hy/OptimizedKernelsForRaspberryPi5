@@ -33,7 +33,7 @@ namespace neon {
     // A is 4x4 (row major or col major? Assuming col major for Eigen default, but standard microkernels often prefer row major packing.
     // Let's assume standard Eigen ColMajor storage for now or standard C-arrays.)
     // For simplicity in this demo, we will assume pointer input.
-    void neon_gemm_4x4_f32(float* C, const float* A, const float* B, std::size_t ldc);
+    void neon_gemm_4x4_f32(float* C, const float* A, std::size_t lda, const float* B, std::size_t ldb, std::size_t ldc);
 
     void neon_fir_f32(const float* x, std::size_t n_x, const float* h, std::size_t n_h, float* y);
 

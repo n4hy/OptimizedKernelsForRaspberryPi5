@@ -229,11 +229,10 @@ float neon_reduce_min_f32(const float* a, std::size_t n) {
 #endif
 }
 
-void neon_gemm_4x4_f32(float* C, const float* A, const float* B, std::size_t ldc) {
+void neon_gemm_4x4_f32(float* C, const float* A, std::size_t lda, const float* B, std::size_t ldb, std::size_t ldc) {
 #ifdef OPTMATH_USE_NEON
-    // A assumed column-major: A columns are contiguous
-    // B assumed column-major: B columns are contiguous
-    // C assumed column-major
+    // A, B, C are assumed to point to the top-left corner of the blocks in larger column-major matrices.
+    // lda, ldb, ldc are the strides (leading dimensions).
 
     // Load C columns
     float32x4_t c0 = vld1q_f32(C);
@@ -242,14 +241,16 @@ void neon_gemm_4x4_f32(float* C, const float* A, const float* B, std::size_t ldc
     float32x4_t c3 = vld1q_f32(C + 3*ldc);
 
     // Load A columns
+    // A block is 4x4. Column 0 is at A, Column 1 at A+lda, etc.
     float32x4_t a0 = vld1q_f32(A);
-    float32x4_t a1 = vld1q_f32(A + 4);
-    float32x4_t a2 = vld1q_f32(A + 8);
-    float32x4_t a3 = vld1q_f32(A + 12);
+    float32x4_t a1 = vld1q_f32(A + lda);
+    float32x4_t a2 = vld1q_f32(A + 2*lda);
+    float32x4_t a3 = vld1q_f32(A + 3*lda);
 
-    // Load B elements. Since B is col-major, B[0], B[1], B[2], B[3] is the first column.
-    // For C = A * B, the first column of C (c0) is A * col0_B.
-    // c0 += a0*B[0,0] + a1*B[1,0] + a2*B[2,0] + a3*B[3,0]
+    // B is 4x4 block.
+    // For C = A * B, Column 0 of C uses Column 0 of B.
+    // Column 0 of B is at B[0], B[1], B[2], B[3]. (B points to start of col 0)
+    // Column 1 of B is at B + ldb.
 
     auto accumulate_col = [&](float32x4_t& c_col, const float* b_col_ptr) {
         c_col = vmlaq_n_f32(c_col, a0, b_col_ptr[0]);
@@ -259,9 +260,9 @@ void neon_gemm_4x4_f32(float* C, const float* A, const float* B, std::size_t ldc
     };
 
     accumulate_col(c0, B);
-    accumulate_col(c1, B + 4);
-    accumulate_col(c2, B + 8);
-    accumulate_col(c3, B + 12);
+    accumulate_col(c1, B + ldb);
+    accumulate_col(c2, B + 2*ldb);
+    accumulate_col(c3, B + 3*ldb);
 
     vst1q_f32(C, c0);
     vst1q_f32(C + ldc, c1);
@@ -273,8 +274,9 @@ void neon_gemm_4x4_f32(float* C, const float* A, const float* B, std::size_t ldc
         for(int i=0; i<4; ++i) {
             float sum = 0.0f;
             for(int k=0; k<4; ++k) {
-                // Col major logic: A[i, k] -> A[i + k*4]
-                sum += A[i + k*4] * B[k + j*4];
+                // A[i, k] is A[i + k*lda]
+                // B[k, j] is B[k + j*ldb]
+                sum += A[i + k*lda] * B[k + j*ldb];
             }
             C[i + j*ldc] += sum;
         }
@@ -427,7 +429,9 @@ Eigen::MatrixXf neon_gemm(const Eigen::MatrixXf& A, const Eigen::MatrixXf& B) {
                 // Check bounds
                 if (i + 4 <= C.rows() && j + 4 <= C.cols() && k + 4 <= A.cols()) {
                     // Fast path: 4x4 aligned block
-                     neon_gemm_4x4_f32(&C(i, j), &A(i, k), &B(k, j), C.outerStride());
+                     neon_gemm_4x4_f32(&C(i, j), &A(i, k), A.outerStride(),
+                                       &B(k, j), B.outerStride(),
+                                       C.outerStride());
                 } else {
                     // Fallback for boundary blocks (naive multiply)
                     long i_lim = std::min(i + 4, (long)C.rows());
