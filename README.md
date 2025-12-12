@@ -1,133 +1,210 @@
 # OptMathKernels
 
-**TL;DR**: A high-performance C++20 numerical library optimized for Raspberry Pi 5. It seamlessly bridges **Eigen** (CPU), **ARM NEON** (SIMD), and **Vulkan** (Compute Shaders) into a single, easy-to-use API.
+**OptMathKernels** is a high-performance C++20 numerical library optimized for **Raspberry Pi 5**. It seamlessly bridges **Eigen** (CPU), **ARM NEON** (SIMD), and **Vulkan** (Compute Shaders) into a single, easy-to-use API.
+
+It is designed to accelerate math and signal processing tasks by leveraging the specialized hardware of the Raspberry Pi 5 (Cortex-A76 NEON and VideoCore VII GPU), while remaining compatible with standard Linux x86/ARM environments.
 
 ---
 
 ## 🚀 Features
 
-*   **NEON**: Hand-tuned ARMv8 NEON intrinsics for SIMD acceleration on 64-bit ARM (aarch64).
-*   **Vulkan**: Compute shader backend for offloading massive parallel tasks to the GPU (VideoCore VII on Pi 5).
-*   **Eigen Integration**: Seamlessly switch between CPU (Eigen), NEON, and Vulkan backends using Eigen types (`Eigen::VectorXf`, etc.).
-*   **Easy Integration**: Standard CMake package that installs to `/usr/local` (or custom prefix) and integrates via `find_package`.
+*   **NEON Acceleration**: Hand-tuned ARMv8 NEON intrinsics for SIMD acceleration on 64-bit ARM (aarch64). Includes optimized matrix multiplication, convolution, and vector math.
+*   **Vulkan Compute**: Massive parallel offloading to the GPU (VideoCore VII on Pi 5). Supports large vector operations, matrix math, FFT (Radix-2/4), and reductions.
+*   **Eigen Integration**: Fully compatible with `Eigen::VectorXf` and `Eigen::MatrixXf`. Pass your existing data structures directly to accelerated kernels.
+*   **Easy Integration**: Standard CMake package that installs to `/usr/local` and works with `find_package(OptMathKernels)`.
 
 ---
 
-## 🔐 Environment Variables
+## 📦 Prerequisites
 
-*   `OPTMATH_KERNELS_PATH`: Set this environment variable to the directory containing the compiled SPIR-V shader files (`*.spv`). This is useful if you are running the application from a custom location or haven't installed the library globally.
+Before building, ensure you have the necessary dependencies installed.
 
-    Example:
-    ```bash
-    export OPTMATH_KERNELS_PATH=/path/to/your/build/src/
-    ```
+### Raspberry Pi 5 / Ubuntu / Debian
 
----
-
-## 🛠️ Builder Guide
-
-### Prerequisites
-*   **C++ Compiler**: GCC 10+ or Clang 11+ (C++20 support required).
-*   **CMake**: 3.18 or newer.
-*   **Vulkan SDK**: `libvulkan-dev`, `glslang-tools` (for shader compilation).
-*   **Eigen3**: Will be automatically fetched if not found on the system.
-
-### Build & Install
+Run the following command to install build tools, CMake, and Vulkan development headers:
 
 ```bash
-# 1. Clone
-git clone <repo_url>
-cd OptMathKernels
+sudo apt update
+sudo apt install -y \
+    build-essential \
+    cmake \
+    git \
+    pkg-config \
+    libeigen3-dev \
+    libvulkan-dev \
+    mesa-vulkan-drivers \
+    vulkan-tools \
+    glslang-tools
+```
 
-# 2. Configure
-mkdir build && cd build
+> **Note:** GoogleTest is automatically fetched during the build (via CMake `FetchContent`), so `libgtest-dev` is not strictly required but recommended for caching.
+
+---
+
+## 🛠️ Build & Install
+
+We provide a robust build process using CMake.
+
+### 1. Clone the Repository
+```bash
+git clone https://github.com/your-username/OptMathKernels.git
+cd OptMathKernels
+```
+
+### 2. Configure and Build
+```bash
+# Create build directory
+mkdir -p build && cd build
+
+# Configure with CMake
+# - ENABLE_NEON=ON:  Enables ARM NEON optimizations (auto-detected on ARM)
+# - ENABLE_VULKAN=ON: Enables GPU Compute kernels
 cmake -DCMAKE_BUILD_TYPE=Release \
       -DENABLE_NEON=ON \
       -DENABLE_VULKAN=ON \
       -DCMAKE_INSTALL_PREFIX=/usr/local \
       ..
 
-# 3. Build
-cmake --build . -j$(nproc)
-
-# 4. Test (Optional)
-ctest --output-on-failure
-
-# 5. Install
-sudo cmake --install .
+# Build using all available cores
+make -j$(nproc)
 ```
 
-### CMake Options
+### 3. Run Tests (Verification)
+Verify that everything is working correctly on your hardware.
+```bash
+ctest --output-on-failure
+```
+You should see all tests pass (`test_basic`, `test_vulkan_vector`, `test_neon_kernels`, etc.).
 
-| Option | Default | Description |
-| :--- | :--- | :--- |
-| `ENABLE_NEON` | `ON` | Enable ARM NEON intrinsics. Automatically simulated/disabled on non-ARM. |
-| `ENABLE_VULKAN` | `ON` | Enable Vulkan backend. Requires Vulkan headers and `glslangValidator`. |
-| `BUILD_EXAMPLES` | `ON` | Build example executable (`demo`). |
-| `BUILD_TESTS` | `ON` | Build unit tests. |
+### 4. Install
+Install the library and headers to the system (default `/usr/local`).
+```bash
+sudo make install
+```
 
 ---
 
-## 📖 User Guide
+## 📖 Usage Guide
 
-### Integration
-Once installed, use `find_package` in your own `CMakeLists.txt`:
+### CMake Integration
+In your project's `CMakeLists.txt`:
 
 ```cmake
+cmake_minimum_required(VERSION 3.18)
+project(MyApp)
+
 find_package(OptMathKernels REQUIRED)
 
 add_executable(my_app main.cpp)
 target_link_libraries(my_app PRIVATE OptMathKernels::OptMathKernels)
 ```
 
-### API Reference
+### C++ API Example
 
-#### 1. NEON (ARM SIMD)
-Header: `#include <optmath/neon_kernels.hpp>`
+#### 1. Vulkan Backend (GPU)
+For large datasets (>100k elements) or heavy compute (FFT, Convolution).
+
+```cpp
+#include <optmath/vulkan_backend.hpp>
+#include <Eigen/Dense>
+#include <iostream>
+
+int main() {
+    // 1. Initialize Check
+    if (!optmath::vulkan::is_available()) {
+        std::cerr << "Vulkan not available!" << std::endl;
+        return 1;
+    }
+
+    // 2. Data Prep
+    int N = 1000000;
+    Eigen::VectorXf a = Eigen::VectorXf::Random(N);
+    Eigen::VectorXf b = Eigen::VectorXf::Random(N);
+
+    // 3. GPU Compute
+    // Vector Addition
+    Eigen::VectorXf c = optmath::vulkan::vulkan_vec_add(a, b);
+
+    // FFT (In-place)
+    // Input size must be power of 2.
+    // Data treated as interleaved complex (Real, Imag, Real, Imag...)
+    Eigen::VectorXf fft_data(2048);
+    fft_data.setRandom();
+    optmath::vulkan::vulkan_fft_radix2(fft_data, false); // Forward
+
+    std::cout << "Computed on GPU!" << std::endl;
+    return 0;
+}
+```
+
+#### 2. NEON Backend (CPU SIMD)
+For low-latency operations or smaller matrices where GPU transfer overhead is too high.
 
 ```cpp
 #include <optmath/neon_kernels.hpp>
 #include <Eigen/Dense>
 
-// Check runtime availability
-if (optmath::neon::is_available()) {
-    Eigen::VectorXf a(10), b(10);
-    // ... fill a, b ...
+int main() {
+    if (optmath::neon::is_available()) {
+        int M = 64, K = 64, N = 64;
+        Eigen::MatrixXf A = Eigen::MatrixXf::Random(M, K);
+        Eigen::MatrixXf B = Eigen::MatrixXf::Random(K, N);
 
-    // Hardware accelerated operations
-    Eigen::VectorXf sum = optmath::neon::neon_add(a, b);
-    float dot = optmath::neon::neon_dot(a, b);
+        // Accelerated Matrix Multiplication (GEMM)
+        Eigen::MatrixXf C = optmath::neon::neon_gemm(A, B);
 
-    // In-place activations
-    optmath::neon::neon_relu(a);
-}
-```
-
-#### 2. Vulkan (GPU Compute)
-Header: `#include <optmath/vulkan_backend.hpp>`
-
-```cpp
-#include <optmath/vulkan_backend.hpp>
-#include <Eigen/Dense>
-
-if (optmath::vulkan::is_available()) {
-    Eigen::VectorXf a(1000), b(1000);
-    // ... fill a, b ...
-
-    // Offload to GPU
-    Eigen::VectorXf sum = optmath::vulkan::vulkan_vec_add(a, b);
-    float dot = optmath::vulkan::vulkan_vec_dot(a, b);
-
-    // 1D Convolution
-    Eigen::VectorXf x(1000), h(50);
-    Eigen::VectorXf y = optmath::vulkan::vulkan_conv1d(x, h);
+        // Accelerated Vector Norm
+        Eigen::VectorXf v = Eigen::VectorXf::Random(1024);
+        float n = optmath::neon::neon_norm(v);
+    }
+    return 0;
 }
 ```
 
 ---
 
-## ⚠️ Raspberry Pi 5 Notes
+## 🔐 Environment Configuration
 
-*   **Vulkan**: Ensure your Pi is running a recent OS (Bookworm 64-bit recommended) with Vulkan drivers installed (`mesa-vulkan-drivers`).
-*   **Overclocking**: While this library is optimized for performance, ensure adequate cooling if running heavy compute loops on the Pi 5.
-*   **Performance**: Small workloads are generally faster on CPU/NEON due to GPU dispatch overhead. Vulkan shines with large vectors (N > 100k).
+### Shader Location (`OPTMATH_KERNELS_PATH`)
+
+OptMathKernels compiles shaders into SPIR-V (`.spv`) files. By default, the library looks for them in:
+1.  The current working directory.
+2.  `../src/` relative path (useful during development).
+3.  `/usr/local/share/optmathkernels/shaders/` (standard install path).
+
+If you are running your application from a non-standard location and getting "Shader file not found" errors, set the `OPTMATH_KERNELS_PATH` environment variable:
+
+```bash
+export OPTMATH_KERNELS_PATH=/path/to/installation/share/optmathkernels/shaders/
+./my_app
+```
+
+---
+
+## ⚡ Raspberry Pi 5 Optimization Tips
+
+1.  **Vulkan Driver**: Ensure the `v3d` kernel module is loaded.
+    ```bash
+    lsmod | grep v3d
+    ```
+    If missing, add `dtoverlay=vc4-kms-v3d` to `/boot/firmware/config.txt` and reboot.
+
+2.  **Performance**:
+    *   **NEON**: Faster for operations that fit in CPU cache (L2/L3) or are memory-bandwidth bound on small arrays.
+    *   **Vulkan**: Faster for heavy arithmetic (Convolution, FFT, huge Matrix Mul) where the GPU's parallelism outweighs data transfer costs.
+
+---
+
+## 🧪 Troubleshooting
+
+*   **"Vulkan not found" during CMake**:
+    *   Ensure `libvulkan-dev` is installed.
+    *   Check `vulkaninfo` runs correctly.
+
+*   **"Could NOT find GTest"**:
+    *   The build script now fetches GTest automatically. If you see issues, try clearing the build directory: `rm -rf build` and re-running CMake.
+
+*   **Runtime "failed to open file: vec_add.comp.spv"**:
+    *   This means the library cannot find the compiled shaders.
+    *   **Fix**: Run `sudo make install` to place them in `/usr/local/share/...`.
+    *   **Fix**: Or set `export OPTMATH_KERNELS_PATH=/path/to/your/build/src/` before running.
