@@ -52,9 +52,41 @@ namespace vulkan {
     // --- Eigen Wrappers ---
 
     Eigen::VectorXf vulkan_vec_add(const Eigen::VectorXf& a, const Eigen::VectorXf& b);
+    Eigen::VectorXf vulkan_vec_sub(const Eigen::VectorXf& a, const Eigen::VectorXf& b);
     Eigen::VectorXf vulkan_vec_mul(const Eigen::VectorXf& a, const Eigen::VectorXf& b);
+    Eigen::VectorXf vulkan_vec_div(const Eigen::VectorXf& a, const Eigen::VectorXf& b);
     float           vulkan_vec_dot(const Eigen::VectorXf& a, const Eigen::VectorXf& b);
-    Eigen::VectorXf vulkan_conv1d(const Eigen::VectorXf& x, const Eigen::VectorXf& h);
+    float           vulkan_vec_norm(const Eigen::VectorXf& a);
+
+    Eigen::MatrixXf vulkan_mat_add(const Eigen::MatrixXf& a, const Eigen::MatrixXf& b);
+    Eigen::MatrixXf vulkan_mat_sub(const Eigen::MatrixXf& a, const Eigen::MatrixXf& b);
+    Eigen::MatrixXf vulkan_mat_mul(const Eigen::MatrixXf& a, const Eigen::MatrixXf& b);
+    Eigen::MatrixXf vulkan_mat_transpose(const Eigen::MatrixXf& a);
+    Eigen::MatrixXf vulkan_mat_scale(const Eigen::MatrixXf& a, float scalar);
+
+    Eigen::VectorXf vulkan_mat_vec_mul(const Eigen::MatrixXf& a, const Eigen::VectorXf& v);
+    Eigen::MatrixXf vulkan_mat_outer_product(const Eigen::VectorXf& u, const Eigen::VectorXf& v);
+    Eigen::MatrixXf vulkan_mat_elementwise_mul(const Eigen::MatrixXf& a, const Eigen::MatrixXf& b);
+
+    // DSP
+    Eigen::VectorXf vulkan_convolution_1d(const Eigen::VectorXf& x, const Eigen::VectorXf& k);
+    Eigen::MatrixXf vulkan_convolution_2d(const Eigen::MatrixXf& x, const Eigen::MatrixXf& k);
+    Eigen::VectorXf vulkan_correlation_1d(const Eigen::VectorXf& x, const Eigen::VectorXf& k);
+    Eigen::MatrixXf vulkan_correlation_2d(const Eigen::MatrixXf& x, const Eigen::MatrixXf& k);
+
+    // Reductions & Scan
+    float vulkan_reduce_sum(const Eigen::VectorXf& a);
+    float vulkan_reduce_max(const Eigen::VectorXf& a);
+    float vulkan_reduce_min(const Eigen::VectorXf& a);
+    Eigen::VectorXf vulkan_scan_prefix_sum(const Eigen::VectorXf& a);
+
+    // FFT
+    // Input/Output: Interleaved Complex (Real, Imag, Real, Imag...). Size must be 2*N.
+    void vulkan_fft_radix2(Eigen::VectorXf& data, bool inverse);
+    void vulkan_fft_radix4(Eigen::VectorXf& data, bool inverse);
+
+    // Deprecated alias
+    inline Eigen::VectorXf vulkan_conv1d(const Eigen::VectorXf& x, const Eigen::VectorXf& k) { return vulkan_convolution_1d(x, k); }
 
 }
 }

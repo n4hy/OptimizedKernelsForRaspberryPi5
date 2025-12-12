@@ -13,6 +13,17 @@
 
 ---
 
+## 🔐 Environment Variables
+
+*   `OPTMATH_KERNELS_PATH`: Set this environment variable to the directory containing the compiled SPIR-V shader files (`*.spv`). This is useful if you are running the application from a custom location or haven't installed the library globally.
+
+    Example:
+    ```bash
+    export OPTMATH_KERNELS_PATH=/path/to/your/build/src/
+    ```
+
+---
+
 ## 🛠️ Builder Guide
 
 ### Prerequisites

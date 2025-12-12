@@ -11,9 +11,31 @@ if(ENABLE_VULKAN)
         # Define shaders to compile
         set(SHADERS
             vec_add.comp.glsl
+            vec_sub.comp.glsl
             vec_mul.comp.glsl
+            vec_div.comp.glsl
             vec_dot.comp.glsl
-            conv1d.comp.glsl
+            vec_norm.comp.glsl
+            mat_add.comp.glsl
+            mat_sub.comp.glsl
+            mat_mul.comp.glsl
+            mat_transpose.comp.glsl
+            mat_scale.comp.glsl
+            mat_vec_mul.comp.glsl
+            mat_outer_product.comp.glsl
+            mat_elementwise_mul.comp.glsl
+            convolution_1d.comp.glsl
+            convolution_2d.comp.glsl
+            correlation_1d.comp.glsl
+            correlation_2d.comp.glsl
+            reduce_sum.comp.glsl
+            reduce_max.comp.glsl
+            reduce_min.comp.glsl
+            scan_prefix_sum.comp.glsl
+            fft_radix2.comp.glsl
+            ifft_radix2.comp.glsl
+            fft_radix4.comp.glsl
+            ifft_radix4.comp.glsl
         )
 
         set(SPV_OUTPUTS "")
