@@ -18,6 +18,13 @@ layout(push_constant) uniform PushConsts {
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx < pc.count) {
-        dataOut[idx] = dataA[idx] / dataB[idx];
+        // Add epsilon to avoid division by zero
+        float denom = dataB[idx];
+        float epsilon = 1e-10;
+        // Sign-preserving epsilon: prevents zero without changing sign
+        if (abs(denom) < epsilon) {
+            denom = (denom >= 0.0) ? epsilon : -epsilon;
+        }
+        dataOut[idx] = dataA[idx] / denom;
     }
 }

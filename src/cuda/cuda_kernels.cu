@@ -8,6 +8,7 @@
  */
 
 #include "optmath/cuda_backend.hpp"
+#include "optmath/cuda_error.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -18,6 +19,9 @@
 #include <cooperative_groups.h>
 
 namespace cg = cooperative_groups;
+
+// Use error checking macros from cuda_error.hpp
+using namespace optmath::cuda;
 
 // =============================================================================
 // Kernel Configuration Helpers
@@ -418,19 +422,35 @@ float cuda_vec_sum_f32(const float* a, size_t n) {
     }
 
     float result = 0.0f;
+    float* d_result = nullptr;
+    void* d_temp_storage = nullptr;
 
     // Allocate device result
-    float* d_result;
-    cudaMalloc(&d_result, sizeof(float));
+    cudaError_t err = cudaMalloc(&d_result, sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error allocating d_result: " << cudaGetErrorString(err) << std::endl;
+        return 0.0f;
+    }
 
-    // Use CUB reduction for efficient parallel sum
-    void* d_temp_storage = nullptr;
+    // Query temp storage size
     size_t temp_storage_bytes = 0;
-    cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, a, d_result, n);
-    cudaMalloc(&d_temp_storage, temp_storage_bytes);
+    cub::DeviceReduce::Sum(nullptr, temp_storage_bytes, a, d_result, n);
+
+    // Allocate temp storage
+    err = cudaMalloc(&d_temp_storage, temp_storage_bytes);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error allocating temp storage: " << cudaGetErrorString(err) << std::endl;
+        cudaFree(d_result);
+        return 0.0f;
+    }
+
+    // Perform reduction
     cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, a, d_result, n);
 
-    cudaMemcpy(&result, d_result, sizeof(float), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(&result, d_result, sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error in memcpy: " << cudaGetErrorString(err) << std::endl;
+    }
 
     cudaFree(d_temp_storage);
     cudaFree(d_result);
@@ -444,16 +464,31 @@ float cuda_vec_sum_f32(const float* a, size_t n) {
 float cuda_vec_max_f32(const float* a, size_t n) {
 #ifdef OPTMATH_USE_CUDA
     float result = 0.0f;
-    float* d_result;
-    cudaMalloc(&d_result, sizeof(float));
-
+    float* d_result = nullptr;
     void* d_temp_storage = nullptr;
+
+    cudaError_t err = cudaMalloc(&d_result, sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error allocating d_result: " << cudaGetErrorString(err) << std::endl;
+        return 0.0f;
+    }
+
     size_t temp_storage_bytes = 0;
-    cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, a, d_result, n);
-    cudaMalloc(&d_temp_storage, temp_storage_bytes);
+    cub::DeviceReduce::Max(nullptr, temp_storage_bytes, a, d_result, n);
+
+    err = cudaMalloc(&d_temp_storage, temp_storage_bytes);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error allocating temp storage: " << cudaGetErrorString(err) << std::endl;
+        cudaFree(d_result);
+        return 0.0f;
+    }
+
     cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, a, d_result, n);
 
-    cudaMemcpy(&result, d_result, sizeof(float), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(&result, d_result, sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error in memcpy: " << cudaGetErrorString(err) << std::endl;
+    }
 
     cudaFree(d_temp_storage);
     cudaFree(d_result);
@@ -467,16 +502,31 @@ float cuda_vec_max_f32(const float* a, size_t n) {
 float cuda_vec_min_f32(const float* a, size_t n) {
 #ifdef OPTMATH_USE_CUDA
     float result = 0.0f;
-    float* d_result;
-    cudaMalloc(&d_result, sizeof(float));
-
+    float* d_result = nullptr;
     void* d_temp_storage = nullptr;
+
+    cudaError_t err = cudaMalloc(&d_result, sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error allocating d_result: " << cudaGetErrorString(err) << std::endl;
+        return 0.0f;
+    }
+
     size_t temp_storage_bytes = 0;
-    cub::DeviceReduce::Min(d_temp_storage, temp_storage_bytes, a, d_result, n);
-    cudaMalloc(&d_temp_storage, temp_storage_bytes);
+    cub::DeviceReduce::Min(nullptr, temp_storage_bytes, a, d_result, n);
+
+    err = cudaMalloc(&d_temp_storage, temp_storage_bytes);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error allocating temp storage: " << cudaGetErrorString(err) << std::endl;
+        cudaFree(d_result);
+        return 0.0f;
+    }
+
     cub::DeviceReduce::Min(d_temp_storage, temp_storage_bytes, a, d_result, n);
 
-    cudaMemcpy(&result, d_result, sizeof(float), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(&result, d_result, sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error in memcpy: " << cudaGetErrorString(err) << std::endl;
+    }
 
     cudaFree(d_temp_storage);
     cudaFree(d_result);
@@ -529,24 +579,38 @@ Eigen::VectorXf cuda_vec_add(const Eigen::VectorXf& a, const Eigen::VectorXf& b)
     }
 
     size_t n = a.size();
-    float* d_a;
-    float* d_b;
-    float* d_out;
+    float* d_a = nullptr;
+    float* d_b = nullptr;
+    float* d_out = nullptr;
+    cudaError_t err;
 
-    cudaMalloc(&d_a, n * sizeof(float));
-    cudaMalloc(&d_b, n * sizeof(float));
-    cudaMalloc(&d_out, n * sizeof(float));
+    auto cleanup = [&]() {
+        if (d_a) cudaFree(d_a);
+        if (d_b) cudaFree(d_b);
+        if (d_out) cudaFree(d_out);
+    };
 
-    cudaMemcpy(d_a, a.data(), n * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b, b.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    err = cudaMalloc(&d_a, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); result = a + b; return result; }
+
+    err = cudaMalloc(&d_b, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); result = a + b; return result; }
+
+    err = cudaMalloc(&d_out, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); result = a + b; return result; }
+
+    err = cudaMemcpy(d_a, a.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); result = a + b; return result; }
+
+    err = cudaMemcpy(d_b, b.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); result = a + b; return result; }
 
     cuda_vec_add_f32(d_out, d_a, d_b, n);
 
-    cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { cleanup(); result = a + b; return result; }
 
-    cudaFree(d_a);
-    cudaFree(d_b);
-    cudaFree(d_out);
+    cleanup();
 #else
     result = a + b;
 #endif
@@ -1074,21 +1138,36 @@ Eigen::MatrixXf cuda_mat_mul(const Eigen::MatrixXf& A, const Eigen::MatrixXf& B)
 #ifdef OPTMATH_USE_CUDA
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
-    float *d_A, *d_B, *d_C;
-    cudaMalloc(&d_A, M * K * sizeof(float));
-    cudaMalloc(&d_B, K * N * sizeof(float));
-    cudaMalloc(&d_C, M * N * sizeof(float));
+    float *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
+    cudaError_t err;
 
-    cudaMemcpy(d_A, A.data(), M * K * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_B, B.data(), K * N * sizeof(float), cudaMemcpyHostToDevice);
+    auto cleanup = [&]() {
+        if (d_A) cudaFree(d_A);
+        if (d_B) cudaFree(d_B);
+        if (d_C) cudaFree(d_C);
+    };
+
+    err = cudaMalloc(&d_A, M * K * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); C = A * B; return C; }
+
+    err = cudaMalloc(&d_B, K * N * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); C = A * B; return C; }
+
+    err = cudaMalloc(&d_C, M * N * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); C = A * B; return C; }
+
+    err = cudaMemcpy(d_A, A.data(), M * K * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); C = A * B; return C; }
+
+    err = cudaMemcpy(d_B, B.data(), K * N * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); C = A * B; return C; }
 
     cuda_mat_mul_f32(d_C, d_A, d_B, M, N, K);
 
-    cudaMemcpy(C.data(), d_C, M * N * sizeof(float), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(C.data(), d_C, M * N * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { cleanup(); C = A * B; return C; }
 
-    cudaFree(d_A);
-    cudaFree(d_B);
-    cudaFree(d_C);
+    cleanup();
 #else
     C = A * B;
 #endif

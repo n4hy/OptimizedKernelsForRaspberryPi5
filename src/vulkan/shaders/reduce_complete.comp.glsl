@@ -9,8 +9,8 @@ layout(std430, binding = 0) readonly buffer Input {
     float dataIn[];
 };
 layout(std430, binding = 1) buffer Output {
-    float result;    // Final scalar result
-    uint counter;    // Atomic counter for workgroup completion
+    uint result_bits;  // Result stored as uint bits for atomic CAS
+    uint counter;      // Atomic counter for workgroup completion
 };
 
 layout(push_constant) uniform PushConsts {
@@ -83,8 +83,8 @@ void main() {
         // Fallback: Use integer atomics by reinterpreting float bits
         // This is a simplified version - production code should use proper atomic float
 
-        // Simple atomic add emulation using integer CAS
-        uint old_bits = floatBitsToUint(result);
+        // Atomic add emulation using integer CAS on result_bits buffer
+        uint old_bits = result_bits;
         uint new_bits;
         float old_val, new_val;
 
@@ -92,7 +92,12 @@ void main() {
             old_val = uintBitsToFloat(old_bits);
             new_val = old_val + sdata[0];
             new_bits = floatBitsToUint(new_val);
-            old_bits = atomicCompSwap(floatBitsToUint(result), old_bits, new_bits);
-        } while (old_bits != floatBitsToUint(old_val));
+            // atomicCompSwap returns the original value at the memory location
+            uint actual_old = atomicCompSwap(result_bits, old_bits, new_bits);
+            if (actual_old == old_bits) {
+                break;  // Success
+            }
+            old_bits = actual_old;  // Retry with actual value
+        } while (true);
     }
 }

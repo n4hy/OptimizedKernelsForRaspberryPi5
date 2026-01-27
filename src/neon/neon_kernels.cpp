@@ -147,16 +147,41 @@ void neon_mul_f32(float* out, const float* a, const float* b, std::size_t n) {
 }
 
 void neon_div_f32(float* out, const float* a, const float* b, std::size_t n) {
+    // Small epsilon to prevent division by zero
+    const float epsilon = 1e-10f;
 #ifdef OPTMATH_USE_NEON
+    float32x4_t veps = vdupq_n_f32(epsilon);
     size_t i = 0;
     for (; i + 3 < n; i += 4) {
-        vst1q_f32(out + i, vdivq_f32(vld1q_f32(a + i), vld1q_f32(b + i)));
+        float32x4_t va = vld1q_f32(a + i);
+        float32x4_t vb = vld1q_f32(b + i);
+        // Add epsilon to denominator to prevent division by zero
+        // Use sign-preserving epsilon: add epsilon if positive, subtract if negative
+        uint32x4_t sign_mask = vcltq_f32(vb, vdupq_n_f32(0.0f));
+        float32x4_t eps_signed = vbslq_f32(sign_mask, vnegq_f32(veps), veps);
+        float32x4_t vb_safe = vaddq_f32(vb, eps_signed);
+        vst1q_f32(out + i, vdivq_f32(va, vb_safe));
     }
     for (; i < n; ++i) {
-        out[i] = a[i] / b[i];
+        float denom = b[i];
+        // Add epsilon with the same sign as denominator to prevent zero crossing
+        if (denom >= 0.0f) {
+            denom += epsilon;
+        } else {
+            denom -= epsilon;
+        }
+        out[i] = a[i] / denom;
     }
 #else
-    for (size_t i = 0; i < n; ++i) out[i] = a[i] / b[i];
+    for (size_t i = 0; i < n; ++i) {
+        float denom = b[i];
+        if (denom >= 0.0f) {
+            denom += epsilon;
+        } else {
+            denom -= epsilon;
+        }
+        out[i] = a[i] / denom;
+    }
 #endif
 }
 
@@ -524,19 +549,30 @@ void neon_cos_f32_approx(float* out, const float* in, std::size_t n) {
 void neon_sigmoid_f32_fast(float* out, const float* in, std::size_t n) {
     // Fast sigmoid: 1 / (1 + exp(-x))
     // Uses vectorized exp approximation
+    // Clamp inputs to prevent overflow: for |x| > 20, sigmoid saturates to 0 or 1
+    const float clamp_max = 20.0f;
+    const float clamp_min = -20.0f;
 
 #ifdef OPTMATH_USE_NEON
     float32x4_t vone = vdupq_n_f32(1.0f);
+    float32x4_t vclamp_max = vdupq_n_f32(clamp_max);
+    float32x4_t vclamp_min = vdupq_n_f32(clamp_min);
 
-    // Negate input for exp(-x)
+    // Clamp and negate input for exp(-x)
     std::vector<float> neg_x(n);
     size_t i = 0;
     for (; i + 3 < n; i += 4) {
         float32x4_t x = vld1q_f32(in + i);
+        // Clamp input to [-20, 20] to prevent overflow in exp
+        x = vminq_f32(vmaxq_f32(x, vclamp_min), vclamp_max);
         vst1q_f32(neg_x.data() + i, vnegq_f32(x));
     }
     for (; i < n; ++i) {
-        neg_x[i] = -in[i];
+        float x = in[i];
+        // Clamp input
+        if (x > clamp_max) x = clamp_max;
+        if (x < clamp_min) x = clamp_min;
+        neg_x[i] = -x;
     }
 
     // Compute exp(-x)
@@ -544,6 +580,7 @@ void neon_sigmoid_f32_fast(float* out, const float* in, std::size_t n) {
     neon_exp_f32_approx(exp_neg_x.data(), neg_x.data(), n);
 
     // Compute 1 / (1 + exp(-x))
+    // Note: denominator is always >= 1.0 since exp(-x) >= 0, so no division by zero possible
     i = 0;
     for (; i + 3 < n; i += 4) {
         float32x4_t e = vld1q_f32(exp_neg_x.data() + i);
@@ -556,7 +593,11 @@ void neon_sigmoid_f32_fast(float* out, const float* in, std::size_t n) {
     }
 #else
     for (size_t i = 0; i < n; ++i) {
-        out[i] = 1.0f / (1.0f + std::exp(-in[i]));
+        float x = in[i];
+        // Clamp input to prevent overflow
+        if (x > clamp_max) x = clamp_max;
+        if (x < clamp_min) x = clamp_min;
+        out[i] = 1.0f / (1.0f + std::exp(-x));
     }
 #endif
 }
@@ -758,99 +799,70 @@ Eigen::MatrixXf neon_mat_transpose(const Eigen::MatrixXf& A) {
     Eigen::MatrixXf C(A.cols(), A.rows());
 #ifdef OPTMATH_USE_NEON
     // Blocked transpose 4x4 using NEON trn/zip/uzp intrinsics
-    // vtrn1q_f32, vtrn2q_f32, etc.
-    // For simplicity, we just use Eigen's implementation or a naive block transpose?
-    // User requested "best build ... add every neon kernel you can find".
-    // A specific 4x4 transpose kernel is good.
+    // Eigen matrices are column-major: A(i,j) accesses row i, col j
+    // Column j of A is contiguous in memory starting at &A(0,j)
+    // For transpose: C(j,i) = A(i,j), meaning row j col i of C equals row i col j of A
 
-    // We assume C is col-major. C(i, j) = A(j, i).
-    // If we iterate 4x4 blocks.
+    const long rows = A.rows();
+    const long cols = A.cols();
+    const long lda = A.outerStride();  // Leading dimension of A (stride between columns)
+    const long ldc = C.outerStride();  // Leading dimension of C (stride between columns)
 
-    for (int j = 0; j < A.cols(); j += 4) {
-        for (int i = 0; i < A.rows(); i += 4) {
-            if (i + 4 <= A.rows() && j + 4 <= A.cols()) {
-                // Transpose 4x4 block from A(i,j) to C(j,i)
-                // Load 4 columns of A
-                float32x4_t c0 = vld1q_f32(&A(i, j));
-                float32x4_t c1 = vld1q_f32(&A(i, j+1));
-                float32x4_t c2 = vld1q_f32(&A(i, j+2));
-                float32x4_t c3 = vld1q_f32(&A(i, j+3));
+    for (long j = 0; j < cols; j += 4) {
+        for (long i = 0; i < rows; i += 4) {
+            if (i + 4 <= rows && j + 4 <= cols) {
+                // Transpose 4x4 block from A(i:i+3, j:j+3) to C(j:j+3, i:i+3)
+                // Load 4 columns of A's block (each column is contiguous)
+                // A's column j is at &A(0,j), so A(i,j) to A(i+3,j) is contiguous
+                float32x4_t a_col0 = vld1q_f32(&A(i, j));      // A[i:i+3, j]
+                float32x4_t a_col1 = vld1q_f32(&A(i, j+1));    // A[i:i+3, j+1]
+                float32x4_t a_col2 = vld1q_f32(&A(i, j+2));    // A[i:i+3, j+2]
+                float32x4_t a_col3 = vld1q_f32(&A(i, j+3));    // A[i:i+3, j+3]
 
-                // Transpose 4x4 in registers
-                // 0: 00 10 20 30
-                // 1: 01 11 21 31
-                // ...
+                // 4x4 in-register transpose using ARM NEON intrinsics
+                // Input vectors (column-major from A):
+                // a_col0 = [A(i,j),   A(i+1,j),   A(i+2,j),   A(i+3,j)]
+                // a_col1 = [A(i,j+1), A(i+1,j+1), A(i+2,j+1), A(i+3,j+1)]
+                // a_col2 = [A(i,j+2), A(i+1,j+2), A(i+2,j+2), A(i+3,j+2)]
+                // a_col3 = [A(i,j+3), A(i+1,j+3), A(i+2,j+3), A(i+3,j+3)]
 
-                // trn1/2 swaps elements
-                float32x4_t t0 = vtrn1q_f32(c0, c1); // 00 01 20 21
-                float32x4_t t1 = vtrn2q_f32(c0, c1); // 10 11 30 31
-                float32x4_t t2 = vtrn1q_f32(c2, c3); // 02 03 22 23
-                float32x4_t t3 = vtrn2q_f32(c2, c3); // 12 13 32 33
+                // After transpose, we want columns of C:
+                // c_col0 = [C(j,i), C(j+1,i), C(j+2,i), C(j+3,i)] = [A(i,j), A(i,j+1), A(i,j+2), A(i,j+3)]
+                // c_col1 = [C(j,i+1), ...] = [A(i+1,j), A(i+1,j+1), ...]
+                // etc.
 
-                // Swap 64-bit halves
-                // C0' = 00 01 02 03 = Low(t0), Low(t2)
-                // C1' = 10 11 12 13 = Low(t1), Low(t3)
-                // C2' = 20 21 22 23 = High(t0), High(t2)
-                // C3' = 30 31 32 33 = High(t1), High(t3)
+                // Step 1: Interleave pairs using vtrn
+                // vtrn1q takes elements at even indices: [a0, b0, a2, b2]
+                // vtrn2q takes elements at odd indices:  [a1, b1, a3, b3]
+                float32x4_t t01_even = vtrn1q_f32(a_col0, a_col1);  // [A(i,j), A(i,j+1), A(i+2,j), A(i+2,j+1)]
+                float32x4_t t01_odd  = vtrn2q_f32(a_col0, a_col1);  // [A(i+1,j), A(i+1,j+1), A(i+3,j), A(i+3,j+1)]
+                float32x4_t t23_even = vtrn1q_f32(a_col2, a_col3);  // [A(i,j+2), A(i,j+3), A(i+2,j+2), A(i+2,j+3)]
+                float32x4_t t23_odd  = vtrn2q_f32(a_col2, a_col3);  // [A(i+1,j+2), A(i+1,j+3), A(i+3,j+2), A(i+3,j+3)]
 
-                // vcombine? No, need vzip or similar.
-                // Actually reinterpret as 64x2 and trn?
-                // Let's use vcombine mechanism manually or just st4?
-                // Actually, vtrn is efficient enough.
-                // Construct from halves:
-                // vextq?
+                // Step 2: Combine low and high halves to complete the transpose
+                // c_col0 = [A(i,j), A(i,j+1), A(i,j+2), A(i,j+3)]
+                float32x4_t c_col0 = vcombine_f32(vget_low_f32(t01_even), vget_low_f32(t23_even));
+                // c_col1 = [A(i+1,j), A(i+1,j+1), A(i+1,j+2), A(i+1,j+3)]
+                float32x4_t c_col1 = vcombine_f32(vget_low_f32(t01_odd), vget_low_f32(t23_odd));
+                // c_col2 = [A(i+2,j), A(i+2,j+1), A(i+2,j+2), A(i+2,j+3)]
+                float32x4_t c_col2 = vcombine_f32(vget_high_f32(t01_even), vget_high_f32(t23_even));
+                // c_col3 = [A(i+3,j), A(i+3,j+1), A(i+3,j+2), A(i+3,j+3)]
+                float32x4_t c_col3 = vcombine_f32(vget_high_f32(t01_odd), vget_high_f32(t23_odd));
 
-                // Simpler: Use vst4q_f32 which interleaves!
-                // Wait, vst4q takes {v0, v1, v2, v3} and stores them interleaved.
-                // If we load 4 cols:
-                // Col0: A00 A10 A20 A30
-                // Col1: A01 A11 A21 A31
-                // ...
-                // If we interpret these as 4 vectors and do vst4, we get:
-                // A00 A01 A02 A03, A10 A11 A12 A13...
-                // Which is exactly the row-major order of the block,
-                // i.e., the columns of the transposed block (since C is col-major).
-                // So: Load 4 vectors (cols of A), Store using vst4 (interleave) into C (cols of C).
-
-                // But vst4q stores linearly.
-                // C is col-major. C's memory for the block is contiguous? No.
-                // C(j, i) -> C's col j, row i.
-                // The block in C starts at C(j, i).
-                // Its columns are C(j, i)...C(j+3, i). These are stride separated by LDC.
-                // So vst4 is not directly usable unless C is transposed in memory?
-                // Wait, Transpose of A -> C.
-                // C[j, i] = A[i, j].
-                // We want to write into C.
-                // C stores columns continuously.
-                // Col j of C is C(0, j)...C(M, j).
-                // We want to write A's row i into C's col i.
-                // A's row i is strided.
-
-                // So we have 4 vectors (Cols of A).
-                // We transpose them in registers to get Rows of A.
-                // Then store each Row of A as a Col of C.
-                // Since C is col-major, a Col of C is contiguous.
-                // So we just need to transpose in registers and store each vector to &C(j, i), &C(j, i+1)...
-
-                // Re-doing transpose logic:
-                // t0 = 00 01 20 21
-                // t2 = 02 03 22 23
-                // out0 = 00 01 02 03 = vcombine_f32(vget_low_f32(t0), vget_low_f32(t2))
-
-                float32x4_t out0 = vcombine_f32(vget_low_f32(t0), vget_low_f32(t2));
-                float32x4_t out1 = vcombine_f32(vget_low_f32(t1), vget_low_f32(t3));
-                float32x4_t out2 = vcombine_f32(vget_high_f32(t0), vget_high_f32(t2));
-                float32x4_t out3 = vcombine_f32(vget_high_f32(t1), vget_high_f32(t3));
-
-                vst1q_f32(&C(j, i), out0);
-                vst1q_f32(&C(j, i+1), out1);
-                vst1q_f32(&C(j, i+2), out2);
-                vst1q_f32(&C(j, i+3), out3);
+                // Store to C: C(j:j+3, i) is column i of C starting at row j
+                // C is col-major, so C's column i is contiguous starting at &C(0,i)
+                // We need to write to &C(j, i), &C(j, i+1), &C(j, i+2), &C(j, i+3)
+                vst1q_f32(&C(j, i), c_col0);
+                vst1q_f32(&C(j, i+1), c_col1);
+                vst1q_f32(&C(j, i+2), c_col2);
+                vst1q_f32(&C(j, i+3), c_col3);
 
             } else {
-                // Fallback
-                for (int ii = i; ii < std::min(i+4, (int)A.rows()); ++ii) {
-                    for (int jj = j; jj < std::min(j+4, (int)A.cols()); ++jj) {
+                // Fallback for boundary blocks
+                long i_end = std::min(i + 4, rows);
+                long j_end = std::min(j + 4, cols);
+                for (long ii = i; ii < i_end; ++ii) {
+                    for (long jj = j; jj < j_end; ++jj) {
                         C(jj, ii) = A(ii, jj);
                     }
                 }

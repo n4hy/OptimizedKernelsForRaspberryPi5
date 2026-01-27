@@ -12,6 +12,7 @@
  */
 
 #include "optmath/cuda_backend.hpp"
+#include "optmath/cuda_error.hpp"
 #include <cmath>
 
 #ifdef OPTMATH_USE_CUDA
@@ -366,50 +367,52 @@ __global__ void kernel_bartlett_spectrum_f32(float* __restrict__ spectrum,
 // NLMS Filter Kernels
 // =============================================================================
 
-// This is a simplified per-sample NLMS update
-// For production, would want block-based processing
-__global__ void kernel_nlms_step_f32(float* __restrict__ weights_re,
-                                      float* __restrict__ weights_im,
-                                      float* __restrict__ error_re,
-                                      float* __restrict__ error_im,
-                                      const float* __restrict__ surv_re,
-                                      const float* __restrict__ surv_im,
-                                      const float* __restrict__ ref_re,
-                                      const float* __restrict__ ref_im,
-                                      float mu, float eps,
-                                      int filter_length,
-                                      int sample_idx) {
-    int tap = blockIdx.x * blockDim.x + threadIdx.x;
+// NOTE: NLMS (Normalized Least Mean Squares) adaptive filtering is inherently
+// sequential due to weight update dependencies between samples. Each sample's
+// weight update depends on the previous sample's weights, making it unsuitable
+// for GPU parallelization without significant algorithmic changes.
+//
+// The kernel below is intentionally left as a stub/placeholder. NLMS filtering
+// should be performed on the CPU (see cuda_nlms_filter() function below) or
+// using block-based LMS variants that can be parallelized (e.g., Block LMS,
+// Frequency-Domain LMS).
+//
+// DO NOT USE THIS KERNEL - it contains race conditions and does not produce
+// correct results. It exists only as documentation of the intended interface.
+//
+// For GPU-accelerated adaptive filtering, consider:
+// 1. Block LMS (BLMS) - processes multiple samples per weight update
+// 2. Frequency-Domain LMS (FDLMS) - uses FFT-based convolution
+// 3. RLS with matrix operations - can leverage cuBLAS
 
-    if (tap >= filter_length) return;
-
-    int ref_idx = sample_idx - tap;
-    if (ref_idx < 0) return;
-
-    // This is a simplified version - real NLMS needs proper convolution
-    // and power normalization across all taps
-    extern __shared__ float sdata[];
-    float* s_power = sdata;
-
-    // Compute reference power for normalization
-    float rr = ref_re[ref_idx];
-    float ri = ref_im[ref_idx];
-    float power = rr * rr + ri * ri;
-
-    s_power[tap] = power;
-    __syncthreads();
-
-    // Sum power (simplified - would use proper reduction)
-    float total_power = 0.0f;
-    for (int i = 0; i < filter_length; ++i) {
-        total_power += s_power[i];
-    }
-
-    float norm = 1.0f / (total_power + eps);
-
-    // Note: This kernel is a placeholder - proper NLMS needs
-    // sequential processing due to weight update dependencies
+#if 0 // DISABLED - PLACEHOLDER ONLY - DO NOT ENABLE
+__global__ void kernel_nlms_step_f32_UNIMPLEMENTED(
+    float* __restrict__ weights_re,
+    float* __restrict__ weights_im,
+    float* __restrict__ error_re,
+    float* __restrict__ error_im,
+    const float* __restrict__ surv_re,
+    const float* __restrict__ surv_im,
+    const float* __restrict__ ref_re,
+    const float* __restrict__ ref_im,
+    float mu, float eps,
+    int filter_length,
+    int sample_idx)
+{
+    // This kernel is intentionally disabled.
+    // NLMS requires sequential weight updates that cannot be parallelized
+    // across samples without introducing race conditions.
+    //
+    // Race conditions in original implementation:
+    // 1. Shared memory s_power[] accessed by all threads but only valid for
+    //    threads where ref_idx >= 0
+    // 2. Weight updates would conflict if multiple threads try to update
+    //    the same weight simultaneously
+    // 3. The power normalization loop assumes all threads have valid data
+    //
+    // Use the CPU implementation cuda_nlms_filter() instead.
 }
+#endif // DISABLED PLACEHOLDER
 
 #endif // OPTMATH_USE_CUDA
 
@@ -426,41 +429,66 @@ Eigen::VectorXf cuda_generate_window(size_t n, WindowType type, float param) {
 #ifdef OPTMATH_USE_CUDA
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
-    float* d_window;
-    cudaMalloc(&d_window, n * sizeof(float));
+    float* d_window = nullptr;
+    cudaError_t err;
 
-    int blocks = div_ceil(n, BLOCK_SIZE);
-
-    switch (type) {
-        case WindowType::RECTANGULAR:
-            cudaMemset(d_window, 0, n * sizeof(float));
-            // Set all to 1.0
-            {
-                std::vector<float> ones(n, 1.0f);
-                cudaMemcpy(d_window, ones.data(), n * sizeof(float), cudaMemcpyHostToDevice);
-            }
-            break;
-        case WindowType::HAMMING:
-            kernel_generate_hamming_f32<<<blocks, BLOCK_SIZE>>>(d_window, static_cast<int>(n));
-            break;
-        case WindowType::HANNING:
-            kernel_generate_hanning_f32<<<blocks, BLOCK_SIZE>>>(d_window, static_cast<int>(n));
-            break;
-        case WindowType::BLACKMAN:
-            kernel_generate_blackman_f32<<<blocks, BLOCK_SIZE>>>(d_window, static_cast<int>(n));
-            break;
-        case WindowType::BLACKMAN_HARRIS:
-            kernel_generate_blackman_harris_f32<<<blocks, BLOCK_SIZE>>>(d_window, static_cast<int>(n));
-            break;
-        default:
-            // Default to Hamming
-            kernel_generate_hamming_f32<<<blocks, BLOCK_SIZE>>>(d_window, static_cast<int>(n));
-            break;
+    err = cudaMalloc(&d_window, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        // Fall through to CPU fallback
+        goto cpu_fallback;
     }
 
-    cudaMemcpy(window.data(), d_window, n * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaFree(d_window);
-#else
+    {
+        int blocks = div_ceil(n, BLOCK_SIZE);
+
+        switch (type) {
+            case WindowType::RECTANGULAR:
+                // Set all to 1.0
+                {
+                    std::vector<float> ones(n, 1.0f);
+                    err = cudaMemcpy(d_window, ones.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+                    if (err != cudaSuccess) {
+                        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+                        cudaFree(d_window);
+                        goto cpu_fallback;
+                    }
+                }
+                break;
+            case WindowType::HAMMING:
+                kernel_generate_hamming_f32<<<blocks, BLOCK_SIZE>>>(d_window, static_cast<int>(n));
+                break;
+            case WindowType::HANNING:
+                kernel_generate_hanning_f32<<<blocks, BLOCK_SIZE>>>(d_window, static_cast<int>(n));
+                break;
+            case WindowType::BLACKMAN:
+                kernel_generate_blackman_f32<<<blocks, BLOCK_SIZE>>>(d_window, static_cast<int>(n));
+                break;
+            case WindowType::BLACKMAN_HARRIS:
+                kernel_generate_blackman_harris_f32<<<blocks, BLOCK_SIZE>>>(d_window, static_cast<int>(n));
+                break;
+            default:
+                // Default to Hamming
+                kernel_generate_hamming_f32<<<blocks, BLOCK_SIZE>>>(d_window, static_cast<int>(n));
+                break;
+        }
+
+        // Synchronize before D2H transfer
+        cudaDeviceSynchronize();
+
+        err = cudaMemcpy(window.data(), d_window, n * sizeof(float), cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+            cudaFree(d_window);
+            goto cpu_fallback;
+        }
+
+        cudaFree(d_window);
+        return window;
+    }
+
+cpu_fallback:
+#endif
     // Fallback: generate on CPU
     for (size_t i = 0; i < n; ++i) {
         switch (type) {
@@ -482,7 +510,6 @@ Eigen::VectorXf cuda_generate_window(size_t n, WindowType type, float param) {
                 break;
         }
     }
-#endif
 
     return window;
 }
@@ -515,25 +542,96 @@ Eigen::MatrixXf cuda_caf(const Eigen::VectorXcf& ref,
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
     // Determine FFT size (next power of 2)
+    // For cross-correlation, we need fft_len >= n_samples + n_range_bins - 1
+    // to avoid circular correlation artifacts. Using 2*n_samples ensures
+    // sufficient zero-padding for linear correlation.
+    size_t min_fft_len = n_samples + n_range_bins;  // Fixed: was 2*n_samples (off-by-one)
     size_t fft_len = 1;
-    while (fft_len < 2 * n_samples) fft_len <<= 1;
+    while (fft_len < min_fft_len) fft_len <<= 1;
 
-    // Allocate device memory
-    float *d_ref_re, *d_ref_im, *d_surv_re, *d_surv_im;
-    float *d_shifted_re, *d_shifted_im;
-    float *d_fft_ref, *d_fft_surv, *d_fft_prod;
-    float *d_caf_out;  // Full CAF output on GPU
+    // Allocate device memory with error checking
+    float *d_ref_re = nullptr, *d_ref_im = nullptr;
+    float *d_surv_re = nullptr, *d_surv_im = nullptr;
+    float *d_shifted_re = nullptr, *d_shifted_im = nullptr;
+    float *d_fft_ref = nullptr, *d_fft_surv = nullptr, *d_fft_prod = nullptr;
+    float *d_caf_out = nullptr;  // Full CAF output on GPU
 
-    cudaMalloc(&d_ref_re, n_samples * sizeof(float));
-    cudaMalloc(&d_ref_im, n_samples * sizeof(float));
-    cudaMalloc(&d_surv_re, n_samples * sizeof(float));
-    cudaMalloc(&d_surv_im, n_samples * sizeof(float));
-    cudaMalloc(&d_shifted_re, n_samples * sizeof(float));
-    cudaMalloc(&d_shifted_im, n_samples * sizeof(float));
-    cudaMalloc(&d_fft_ref, fft_len * 2 * sizeof(float));
-    cudaMalloc(&d_fft_surv, fft_len * 2 * sizeof(float));
-    cudaMalloc(&d_fft_prod, fft_len * 2 * sizeof(float));
-    cudaMalloc(&d_caf_out, n_doppler_bins * n_range_bins * sizeof(float));
+    // Helper lambda for cleanup on error
+    auto cleanup = [&]() {
+        if (d_ref_re) cudaFree(d_ref_re);
+        if (d_ref_im) cudaFree(d_ref_im);
+        if (d_surv_re) cudaFree(d_surv_re);
+        if (d_surv_im) cudaFree(d_surv_im);
+        if (d_shifted_re) cudaFree(d_shifted_re);
+        if (d_shifted_im) cudaFree(d_shifted_im);
+        if (d_fft_ref) cudaFree(d_fft_ref);
+        if (d_fft_surv) cudaFree(d_fft_surv);
+        if (d_fft_prod) cudaFree(d_fft_prod);
+        if (d_caf_out) cudaFree(d_caf_out);
+    };
+
+    cudaError_t err;
+
+    err = cudaMalloc(&d_ref_re, n_samples * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return caf_out;
+    }
+    err = cudaMalloc(&d_ref_im, n_samples * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return caf_out;
+    }
+    err = cudaMalloc(&d_surv_re, n_samples * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return caf_out;
+    }
+    err = cudaMalloc(&d_surv_im, n_samples * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return caf_out;
+    }
+    err = cudaMalloc(&d_shifted_re, n_samples * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return caf_out;
+    }
+    err = cudaMalloc(&d_shifted_im, n_samples * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return caf_out;
+    }
+    err = cudaMalloc(&d_fft_ref, fft_len * 2 * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return caf_out;
+    }
+    err = cudaMalloc(&d_fft_surv, fft_len * 2 * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return caf_out;
+    }
+    err = cudaMalloc(&d_fft_prod, fft_len * 2 * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return caf_out;
+    }
+    err = cudaMalloc(&d_caf_out, n_doppler_bins * n_range_bins * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return caf_out;
+    }
 
     // Deinterleave and copy input signals (one-time H2D transfer)
     std::vector<float> ref_re(n_samples), ref_im(n_samples);
@@ -546,19 +644,47 @@ Eigen::MatrixXf cuda_caf(const Eigen::VectorXcf& ref,
         surv_im[i] = surv[i].imag();
     }
 
-    cudaMemcpy(d_ref_re, ref_re.data(), n_samples * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_ref_im, ref_im.data(), n_samples * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_surv_re, surv_re.data(), n_samples * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_surv_im, surv_im.data(), n_samples * sizeof(float), cudaMemcpyHostToDevice);
+    err = cudaMemcpy(d_ref_re, ref_re.data(), n_samples * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return caf_out;
+    }
+    err = cudaMemcpy(d_ref_im, ref_im.data(), n_samples * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return caf_out;
+    }
+    err = cudaMemcpy(d_surv_re, surv_re.data(), n_samples * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return caf_out;
+    }
+    err = cudaMemcpy(d_surv_im, surv_im.data(), n_samples * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return caf_out;
+    }
 
     // Create FFT plan
     cufftHandle fft_plan;
-    cufftPlan1d(&fft_plan, static_cast<int>(fft_len), CUFFT_C2C, 1);
+    cufftResult fft_result = cufftPlan1d(&fft_plan, static_cast<int>(fft_len), CUFFT_C2C, 1);
+    if (fft_result != CUFFT_SUCCESS) {
+        std::cerr << "cuFFT error: plan creation failed with status " << fft_result << std::endl;
+        cleanup();
+        return caf_out;
+    }
 
     // Interleave surveillance signal on GPU (zero-padded)
     int blocks_fft = div_ceil(fft_len, BLOCK_SIZE);
     kernel_interleave_complex_f32<<<blocks_fft, BLOCK_SIZE>>>(
         d_fft_surv, d_surv_re, d_surv_im, static_cast<int>(n_samples), static_cast<int>(fft_len));
+
+    // Synchronize before FFT depends on kernel output
+    cudaDeviceSynchronize();
 
     // FFT surveillance signal (once)
     cufftExecC2C(fft_plan,
@@ -580,9 +706,15 @@ Eigen::MatrixXf cuda_caf(const Eigen::VectorXcf& ref,
             d_ref_re, d_ref_im,
             doppler_freq, sample_rate, static_cast<int>(n_samples));
 
+        // Synchronize before interleave depends on Doppler shift output
+        cudaDeviceSynchronize();
+
         // Interleave shifted reference on GPU (zero-padded)
         kernel_interleave_complex_f32<<<blocks_fft, BLOCK_SIZE>>>(
             d_fft_ref, d_shifted_re, d_shifted_im, static_cast<int>(n_samples), static_cast<int>(fft_len));
+
+        // Synchronize before FFT depends on interleave output
+        cudaDeviceSynchronize();
 
         // FFT shifted reference
         cufftExecC2C(fft_plan,
@@ -590,9 +722,15 @@ Eigen::MatrixXf cuda_caf(const Eigen::VectorXcf& ref,
                      reinterpret_cast<cufftComplex*>(d_fft_ref),
                      CUFFT_FORWARD);
 
+        // Synchronize before multiply depends on FFT output
+        cudaDeviceSynchronize();
+
         // Multiply: Surv * conj(Ref) on GPU
         kernel_complex_conj_mul_interleaved_f32<<<blocks_fft, BLOCK_SIZE>>>(
             d_fft_prod, d_fft_surv, d_fft_ref, scale, static_cast<int>(fft_len));
+
+        // Synchronize before IFFT depends on multiply output
+        cudaDeviceSynchronize();
 
         // IFFT
         cufftExecC2C(fft_plan,
@@ -600,27 +738,27 @@ Eigen::MatrixXf cuda_caf(const Eigen::VectorXcf& ref,
                      reinterpret_cast<cufftComplex*>(d_fft_prod),
                      CUFFT_INVERSE);
 
+        // Synchronize before magnitude depends on IFFT output
+        cudaDeviceSynchronize();
+
         // Extract magnitude directly to output row on GPU
         int blocks_range = div_ceil(n_range_bins, BLOCK_SIZE);
         kernel_magnitude_interleaved_f32<<<blocks_range, BLOCK_SIZE>>>(
             d_caf_out + d * n_range_bins, d_fft_prod, static_cast<int>(n_range_bins));
     }
 
+    // Final synchronize before D2H transfer
+    cudaDeviceSynchronize();
+
     // Single D2H transfer at the end
-    cudaMemcpy(caf_out.data(), d_caf_out, n_doppler_bins * n_range_bins * sizeof(float), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(caf_out.data(), d_caf_out, n_doppler_bins * n_range_bins * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+    }
 
     // Cleanup
     cufftDestroy(fft_plan);
-    cudaFree(d_ref_re);
-    cudaFree(d_ref_im);
-    cudaFree(d_surv_re);
-    cudaFree(d_surv_im);
-    cudaFree(d_shifted_re);
-    cudaFree(d_shifted_im);
-    cudaFree(d_fft_ref);
-    cudaFree(d_fft_surv);
-    cudaFree(d_fft_prod);
-    cudaFree(d_caf_out);
+    cleanup();
 
 #else
     // Fallback: compute on CPU
@@ -641,35 +779,63 @@ Eigen::MatrixXi cuda_cfar_2d(const Eigen::MatrixXf& power_map,
     int n_doppler = power_map.rows();
     int n_range = power_map.cols();
     Eigen::MatrixXi detections(n_doppler, n_range);
+    detections.setZero();
 
 #ifdef OPTMATH_USE_CUDA
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
-    float* d_power;
-    int* d_detections;
+    float* d_power = nullptr;
+    int* d_detections = nullptr;
+    cudaError_t err;
 
-    cudaMalloc(&d_power, n_doppler * n_range * sizeof(float));
-    cudaMalloc(&d_detections, n_doppler * n_range * sizeof(int));
+    err = cudaMalloc(&d_power, n_doppler * n_range * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        goto cpu_fallback_cfar2d;
+    }
 
-    cudaMemcpy(d_power, power_map.data(), n_doppler * n_range * sizeof(float), cudaMemcpyHostToDevice);
+    err = cudaMalloc(&d_detections, n_doppler * n_range * sizeof(int));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cudaFree(d_power);
+        goto cpu_fallback_cfar2d;
+    }
 
-    dim3 block(BLOCK_2D, BLOCK_2D);
-    dim3 grid(div_ceil(n_range, BLOCK_2D), div_ceil(n_doppler, BLOCK_2D));
+    err = cudaMemcpy(d_power, power_map.data(), n_doppler * n_range * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cudaFree(d_power);
+        cudaFree(d_detections);
+        goto cpu_fallback_cfar2d;
+    }
 
-    kernel_cfar_2d_f32<<<grid, block>>>(
-        d_detections, d_power,
-        n_doppler, n_range,
-        guard_doppler, guard_range,
-        ref_doppler, ref_range,
-        pfa_factor);
+    {
+        dim3 block(BLOCK_2D, BLOCK_2D);
+        dim3 grid(div_ceil(n_range, BLOCK_2D), div_ceil(n_doppler, BLOCK_2D));
 
-    cudaMemcpy(detections.data(), d_detections, n_doppler * n_range * sizeof(int), cudaMemcpyDeviceToHost);
+        kernel_cfar_2d_f32<<<grid, block>>>(
+            d_detections, d_power,
+            n_doppler, n_range,
+            guard_doppler, guard_range,
+            ref_doppler, ref_range,
+            pfa_factor);
 
-    cudaFree(d_power);
-    cudaFree(d_detections);
-#else
+        // Synchronize before D2H transfer
+        cudaDeviceSynchronize();
+
+        err = cudaMemcpy(detections.data(), d_detections, n_doppler * n_range * sizeof(int), cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        }
+
+        cudaFree(d_power);
+        cudaFree(d_detections);
+        return detections;
+    }
+
+cpu_fallback_cfar2d:
+#endif
     // Fallback: compute on CPU
-    detections.setZero();
     for (int d = 0; d < n_doppler; ++d) {
         for (int r = 0; r < n_range; ++r) {
             float sum = 0.0f;
@@ -692,7 +858,6 @@ Eigen::MatrixXi cuda_cfar_2d(const Eigen::MatrixXf& power_map,
             detections(d, r) = (power_map(d, r) > threshold) ? 1 : 0;
         }
     }
-#endif
 
     return detections;
 }
@@ -702,29 +867,50 @@ Eigen::VectorXi cuda_cfar_ca(const Eigen::VectorXf& power,
                               float pfa_factor) {
     int n = power.size();
     Eigen::VectorXi detections(n);
+    detections.setZero();
 
 #ifdef OPTMATH_USE_CUDA
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
-    float* d_power;
-    int* d_detections;
+    float* d_power = nullptr;
+    int* d_detections = nullptr;
+    cudaError_t err;
 
-    cudaMalloc(&d_power, n * sizeof(float));
-    cudaMalloc(&d_detections, n * sizeof(int));
+    err = cudaMalloc(&d_power, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        return detections;
+    }
 
-    cudaMemcpy(d_power, power.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    err = cudaMalloc(&d_detections, n * sizeof(int));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cudaFree(d_power);
+        return detections;
+    }
+
+    err = cudaMemcpy(d_power, power.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cudaFree(d_power);
+        cudaFree(d_detections);
+        return detections;
+    }
 
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_cfar_ca_1d_f32<<<blocks, BLOCK_SIZE>>>(
         d_detections, d_power, n, guard_cells, ref_cells, pfa_factor);
 
-    cudaMemcpy(detections.data(), d_detections, n * sizeof(int), cudaMemcpyDeviceToHost);
+    // Synchronize before D2H transfer
+    cudaDeviceSynchronize();
+
+    err = cudaMemcpy(detections.data(), d_detections, n * sizeof(int), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+    }
 
     cudaFree(d_power);
     cudaFree(d_detections);
-#else
-    // Fallback
-    detections.setZero();
 #endif
 
     return detections;
@@ -739,6 +925,7 @@ Eigen::VectorXf cuda_bartlett_spectrum(const Eigen::VectorXcf& array_data,
                                         int n_angles) {
     int n_elements = array_data.size();
     Eigen::VectorXf spectrum(n_angles);
+    spectrum.setZero();
 
 #ifdef OPTMATH_USE_CUDA
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
@@ -749,44 +936,112 @@ Eigen::VectorXf cuda_bartlett_spectrum(const Eigen::VectorXcf& array_data,
         angles[i] = (-90.0f + i * 180.0f / (n_angles - 1)) * PI / 180.0f;
     }
 
-    // Allocate device memory
-    float *d_angles, *d_steer_re, *d_steer_im, *d_data_re, *d_data_im, *d_spectrum;
-    cudaMalloc(&d_angles, n_angles * sizeof(float));
-    cudaMalloc(&d_steer_re, n_angles * n_elements * sizeof(float));
-    cudaMalloc(&d_steer_im, n_angles * n_elements * sizeof(float));
-    cudaMalloc(&d_data_re, n_elements * sizeof(float));
-    cudaMalloc(&d_data_im, n_elements * sizeof(float));
-    cudaMalloc(&d_spectrum, n_angles * sizeof(float));
+    // Allocate device memory with error checking
+    float *d_angles = nullptr, *d_steer_re = nullptr, *d_steer_im = nullptr;
+    float *d_data_re = nullptr, *d_data_im = nullptr, *d_spectrum = nullptr;
+    cudaError_t err;
+
+    auto cleanup_bartlett = [&]() {
+        if (d_angles) cudaFree(d_angles);
+        if (d_steer_re) cudaFree(d_steer_re);
+        if (d_steer_im) cudaFree(d_steer_im);
+        if (d_data_re) cudaFree(d_data_re);
+        if (d_data_im) cudaFree(d_data_im);
+        if (d_spectrum) cudaFree(d_spectrum);
+    };
+
+    err = cudaMalloc(&d_angles, n_angles * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup_bartlett();
+        goto cpu_fallback_bartlett;
+    }
+    err = cudaMalloc(&d_steer_re, n_angles * n_elements * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup_bartlett();
+        goto cpu_fallback_bartlett;
+    }
+    err = cudaMalloc(&d_steer_im, n_angles * n_elements * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup_bartlett();
+        goto cpu_fallback_bartlett;
+    }
+    err = cudaMalloc(&d_data_re, n_elements * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup_bartlett();
+        goto cpu_fallback_bartlett;
+    }
+    err = cudaMalloc(&d_data_im, n_elements * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup_bartlett();
+        goto cpu_fallback_bartlett;
+    }
+    err = cudaMalloc(&d_spectrum, n_angles * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup_bartlett();
+        goto cpu_fallback_bartlett;
+    }
 
     // Copy angles and data
-    cudaMemcpy(d_angles, angles.data(), n_angles * sizeof(float), cudaMemcpyHostToDevice);
-
-    std::vector<float> data_re(n_elements), data_im(n_elements);
-    for (int i = 0; i < n_elements; ++i) {
-        data_re[i] = array_data[i].real();
-        data_im[i] = array_data[i].imag();
+    err = cudaMemcpy(d_angles, angles.data(), n_angles * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup_bartlett();
+        goto cpu_fallback_bartlett;
     }
-    cudaMemcpy(d_data_re, data_re.data(), n_elements * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_data_im, data_im.data(), n_elements * sizeof(float), cudaMemcpyHostToDevice);
+
+    {
+        std::vector<float> data_re(n_elements), data_im(n_elements);
+        for (int i = 0; i < n_elements; ++i) {
+            data_re[i] = array_data[i].real();
+            data_im[i] = array_data[i].imag();
+        }
+        err = cudaMemcpy(d_data_re, data_re.data(), n_elements * sizeof(float), cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+            cleanup_bartlett();
+            goto cpu_fallback_bartlett;
+        }
+        err = cudaMemcpy(d_data_im, data_im.data(), n_elements * sizeof(float), cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+            cleanup_bartlett();
+            goto cpu_fallback_bartlett;
+        }
+    }
 
     // Generate steering vectors
     kernel_steering_vectors_batch_f32<<<n_angles, n_elements>>>(
         d_steer_re, d_steer_im, d_angles, d_lambda, n_elements, n_angles);
 
+    // Synchronize before Bartlett spectrum depends on steering vectors
+    cudaDeviceSynchronize();
+
     // Compute Bartlett spectrum
-    int smem_size = 2 * 256 * sizeof(float);
-    kernel_bartlett_spectrum_f32<<<n_angles, 256, smem_size>>>(
-        d_spectrum, d_steer_re, d_steer_im, d_data_re, d_data_im, n_elements, n_angles);
+    {
+        int smem_size = 2 * 256 * sizeof(float);
+        kernel_bartlett_spectrum_f32<<<n_angles, 256, smem_size>>>(
+            d_spectrum, d_steer_re, d_steer_im, d_data_re, d_data_im, n_elements, n_angles);
+    }
 
-    cudaMemcpy(spectrum.data(), d_spectrum, n_angles * sizeof(float), cudaMemcpyDeviceToHost);
+    // Synchronize before D2H transfer
+    cudaDeviceSynchronize();
 
-    cudaFree(d_angles);
-    cudaFree(d_steer_re);
-    cudaFree(d_steer_im);
-    cudaFree(d_data_re);
-    cudaFree(d_data_im);
-    cudaFree(d_spectrum);
-#else
+    err = cudaMemcpy(spectrum.data(), d_spectrum, n_angles * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+    }
+
+    cleanup_bartlett();
+    return spectrum;
+
+cpu_fallback_bartlett:
+#endif
     // Fallback: compute on CPU
     for (int a = 0; a < n_angles; ++a) {
         float theta = (-90.0f + a * 180.0f / (n_angles - 1)) * PI / 180.0f;
@@ -799,7 +1054,6 @@ Eigen::VectorXf cuda_bartlett_spectrum(const Eigen::VectorXcf& array_data,
         }
         spectrum[a] = std::norm(sum);
     }
-#endif
 
     return spectrum;
 }
@@ -813,31 +1067,75 @@ Eigen::MatrixXcf cuda_steering_vectors_ula(int n_elements,
 #ifdef OPTMATH_USE_CUDA
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
-    float *d_angles, *d_steer_re, *d_steer_im;
-    cudaMalloc(&d_angles, n_angles * sizeof(float));
-    cudaMalloc(&d_steer_re, n_angles * n_elements * sizeof(float));
-    cudaMalloc(&d_steer_im, n_angles * n_elements * sizeof(float));
+    float *d_angles = nullptr, *d_steer_re = nullptr, *d_steer_im = nullptr;
+    cudaError_t err;
 
-    cudaMemcpy(d_angles, angles.data(), n_angles * sizeof(float), cudaMemcpyHostToDevice);
+    auto cleanup_steer = [&]() {
+        if (d_angles) cudaFree(d_angles);
+        if (d_steer_re) cudaFree(d_steer_re);
+        if (d_steer_im) cudaFree(d_steer_im);
+    };
+
+    err = cudaMalloc(&d_angles, n_angles * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup_steer();
+        goto cpu_fallback_steer;
+    }
+    err = cudaMalloc(&d_steer_re, n_angles * n_elements * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup_steer();
+        goto cpu_fallback_steer;
+    }
+    err = cudaMalloc(&d_steer_im, n_angles * n_elements * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup_steer();
+        goto cpu_fallback_steer;
+    }
+
+    err = cudaMemcpy(d_angles, angles.data(), n_angles * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup_steer();
+        goto cpu_fallback_steer;
+    }
 
     kernel_steering_vectors_batch_f32<<<n_angles, n_elements>>>(
         d_steer_re, d_steer_im, d_angles, d_lambda, n_elements, n_angles);
 
-    std::vector<float> steer_re(n_angles * n_elements), steer_im(n_angles * n_elements);
-    cudaMemcpy(steer_re.data(), d_steer_re, n_angles * n_elements * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(steer_im.data(), d_steer_im, n_angles * n_elements * sizeof(float), cudaMemcpyDeviceToHost);
+    // Synchronize before D2H transfer
+    cudaDeviceSynchronize();
 
-    for (int a = 0; a < n_angles; ++a) {
-        for (int e = 0; e < n_elements; ++e) {
-            int idx = a * n_elements + e;
-            steering(a, e) = std::complex<float>(steer_re[idx], steer_im[idx]);
+    {
+        std::vector<float> steer_re(n_angles * n_elements), steer_im(n_angles * n_elements);
+        err = cudaMemcpy(steer_re.data(), d_steer_re, n_angles * n_elements * sizeof(float), cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+            cleanup_steer();
+            goto cpu_fallback_steer;
         }
+        err = cudaMemcpy(steer_im.data(), d_steer_im, n_angles * n_elements * sizeof(float), cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+            cleanup_steer();
+            goto cpu_fallback_steer;
+        }
+
+        for (int a = 0; a < n_angles; ++a) {
+            for (int e = 0; e < n_elements; ++e) {
+                int idx = a * n_elements + e;
+                steering(a, e) = std::complex<float>(steer_re[idx], steer_im[idx]);
+            }
+        }
+
+        cleanup_steer();
+        return steering;
     }
 
-    cudaFree(d_angles);
-    cudaFree(d_steer_re);
-    cudaFree(d_steer_im);
-#else
+cpu_fallback_steer:
+#endif
     // Fallback
     for (int a = 0; a < n_angles; ++a) {
         float theta = angles[a];
@@ -846,7 +1144,6 @@ Eigen::MatrixXcf cuda_steering_vectors_ula(int n_elements,
             steering(a, e) = std::complex<float>(std::cos(phase), std::sin(phase));
         }
     }
-#endif
 
     return steering;
 }

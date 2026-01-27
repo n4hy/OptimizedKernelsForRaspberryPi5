@@ -308,6 +308,15 @@ void caf_f32(float* out_mag,
 
         // Cross-correlate shifted reference with surveillance for each range bin
         for (std::size_t r = 0; r < n_range_bins; ++r) {
+            // CRITICAL: Bounds check to prevent out-of-bounds memory access
+            // When r >= n_samples, max_i would underflow (wrap around for unsigned)
+            // causing memory access beyond array bounds
+            if (r >= n_samples) {
+                // No valid samples for this range bin, set magnitude to zero
+                out_mag[d * n_range_bins + r] = 0.0f;
+                continue;
+            }
+
             // Compute correlation at this range delay
             float corr_re = 0.0f, corr_im = 0.0f;
             std::size_t max_i = n_samples - r;

@@ -8,6 +8,7 @@
  */
 
 #include "optmath/cuda_backend.hpp"
+#include "optmath/cuda_error.hpp"
 #include <cmath>
 
 #ifdef OPTMATH_USE_CUDA
@@ -170,6 +171,12 @@ __global__ void kernel_complex_dot_reduce_f32(float* __restrict__ out_re,
 
     size_t tid = threadIdx.x;
     size_t idx = blockIdx.x * blockDim.x * 2 + threadIdx.x;
+
+    // Initialize shared memory to zero before any computation
+    // This ensures threads that don't participate have zero contribution
+    sdata_re[tid] = 0.0f;
+    sdata_im[tid] = 0.0f;
+    __syncthreads();
 
     // Initialize accumulators
     float sum_re = 0.0f;
@@ -360,9 +367,9 @@ void cuda_complex_dot_f32(float* out_re, float* out_im,
                           const float* a_re, const float* a_im,
                           const float* b_re, const float* b_im, size_t n) {
 #ifdef OPTMATH_USE_CUDA
-    // Initialize output to zero
-    cudaMemset(out_re, 0, sizeof(float));
-    cudaMemset(out_im, 0, sizeof(float));
+    // Initialize output to zero - must succeed before launching kernel
+    CUDA_CHECK(cudaMemset(out_re, 0, sizeof(float)));
+    CUDA_CHECK(cudaMemset(out_im, 0, sizeof(float)));
 
     int blocks = div_ceil(n, BLOCK_SIZE * 2);
     blocks = std::min(blocks, 256);  // Cap number of blocks
@@ -370,6 +377,7 @@ void cuda_complex_dot_f32(float* out_re, float* out_im,
 
     kernel_complex_dot_reduce_f32<<<blocks, BLOCK_SIZE, smem_size>>>(
         out_re, out_im, a_re, a_im, b_re, b_im, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -405,14 +413,57 @@ Eigen::VectorXcf cuda_complex_mul(const Eigen::VectorXcf& a, const Eigen::Vector
 #ifdef OPTMATH_USE_CUDA
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
-    // Allocate device memory
-    float *d_a_re, *d_a_im, *d_b_re, *d_b_im, *d_out_re, *d_out_im;
-    cudaMalloc(&d_a_re, n * sizeof(float));
-    cudaMalloc(&d_a_im, n * sizeof(float));
-    cudaMalloc(&d_b_re, n * sizeof(float));
-    cudaMalloc(&d_b_im, n * sizeof(float));
-    cudaMalloc(&d_out_re, n * sizeof(float));
-    cudaMalloc(&d_out_im, n * sizeof(float));
+    // Allocate device memory with error checking
+    float *d_a_re = nullptr, *d_a_im = nullptr, *d_b_re = nullptr;
+    float *d_b_im = nullptr, *d_out_re = nullptr, *d_out_im = nullptr;
+
+    // Helper lambda for cleanup on error
+    auto cleanup = [&]() {
+        if (d_a_re) cudaFree(d_a_re);
+        if (d_a_im) cudaFree(d_a_im);
+        if (d_b_re) cudaFree(d_b_re);
+        if (d_b_im) cudaFree(d_b_im);
+        if (d_out_re) cudaFree(d_out_re);
+        if (d_out_im) cudaFree(d_out_im);
+    };
+
+    cudaError_t err;
+    err = cudaMalloc(&d_a_re, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.array();  // Fallback to CPU
+    }
+    err = cudaMalloc(&d_a_im, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.array();
+    }
+    err = cudaMalloc(&d_b_re, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.array();
+    }
+    err = cudaMalloc(&d_b_im, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.array();
+    }
+    err = cudaMalloc(&d_out_re, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.array();
+    }
+    err = cudaMalloc(&d_out_im, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.array();
+    }
 
     // Deinterleave and copy
     std::vector<float> a_re(n), a_im(n), b_re(n), b_im(n);
@@ -423,29 +474,54 @@ Eigen::VectorXcf cuda_complex_mul(const Eigen::VectorXcf& a, const Eigen::Vector
         b_im[i] = b[i].imag();
     }
 
-    cudaMemcpy(d_a_re, a_re.data(), n * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_a_im, a_im.data(), n * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b_re, b_re.data(), n * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b_im, b_im.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    err = cudaMemcpy(d_a_re, a_re.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.array();
+    }
+    err = cudaMemcpy(d_a_im, a_im.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.array();
+    }
+    err = cudaMemcpy(d_b_re, b_re.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.array();
+    }
+    err = cudaMemcpy(d_b_im, b_im.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.array();
+    }
 
     // Compute
     cuda_complex_mul_f32(d_out_re, d_out_im, d_a_re, d_a_im, d_b_re, d_b_im, n);
 
     // Copy back and interleave
     std::vector<float> out_re(n), out_im(n);
-    cudaMemcpy(out_re.data(), d_out_re, n * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(out_im.data(), d_out_im, n * sizeof(float), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(out_re.data(), d_out_re, n * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.array();
+    }
+    err = cudaMemcpy(out_im.data(), d_out_im, n * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.array();
+    }
 
     for (size_t i = 0; i < n; ++i) {
         result[i] = std::complex<float>(out_re[i], out_im[i]);
     }
 
-    cudaFree(d_a_re);
-    cudaFree(d_a_im);
-    cudaFree(d_b_re);
-    cudaFree(d_b_im);
-    cudaFree(d_out_re);
-    cudaFree(d_out_im);
+    cleanup();
 #else
     result = a.array() * b.array();
 #endif
@@ -460,13 +536,55 @@ Eigen::VectorXcf cuda_complex_conj_mul(const Eigen::VectorXcf& a, const Eigen::V
 #ifdef OPTMATH_USE_CUDA
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
-    float *d_a_re, *d_a_im, *d_b_re, *d_b_im, *d_out_re, *d_out_im;
-    cudaMalloc(&d_a_re, n * sizeof(float));
-    cudaMalloc(&d_a_im, n * sizeof(float));
-    cudaMalloc(&d_b_re, n * sizeof(float));
-    cudaMalloc(&d_b_im, n * sizeof(float));
-    cudaMalloc(&d_out_re, n * sizeof(float));
-    cudaMalloc(&d_out_im, n * sizeof(float));
+    float *d_a_re = nullptr, *d_a_im = nullptr, *d_b_re = nullptr;
+    float *d_b_im = nullptr, *d_out_re = nullptr, *d_out_im = nullptr;
+
+    auto cleanup = [&]() {
+        if (d_a_re) cudaFree(d_a_re);
+        if (d_a_im) cudaFree(d_a_im);
+        if (d_b_re) cudaFree(d_b_re);
+        if (d_b_im) cudaFree(d_b_im);
+        if (d_out_re) cudaFree(d_out_re);
+        if (d_out_im) cudaFree(d_out_im);
+    };
+
+    cudaError_t err;
+    err = cudaMalloc(&d_a_re, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.conjugate().array();
+    }
+    err = cudaMalloc(&d_a_im, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.conjugate().array();
+    }
+    err = cudaMalloc(&d_b_re, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.conjugate().array();
+    }
+    err = cudaMalloc(&d_b_im, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.conjugate().array();
+    }
+    err = cudaMalloc(&d_out_re, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.conjugate().array();
+    }
+    err = cudaMalloc(&d_out_im, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.conjugate().array();
+    }
 
     std::vector<float> a_re(n), a_im(n), b_re(n), b_im(n);
     for (size_t i = 0; i < n; ++i) {
@@ -476,27 +594,52 @@ Eigen::VectorXcf cuda_complex_conj_mul(const Eigen::VectorXcf& a, const Eigen::V
         b_im[i] = b[i].imag();
     }
 
-    cudaMemcpy(d_a_re, a_re.data(), n * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_a_im, a_im.data(), n * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b_re, b_re.data(), n * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b_im, b_im.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    err = cudaMemcpy(d_a_re, a_re.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.conjugate().array();
+    }
+    err = cudaMemcpy(d_a_im, a_im.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.conjugate().array();
+    }
+    err = cudaMemcpy(d_b_re, b_re.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.conjugate().array();
+    }
+    err = cudaMemcpy(d_b_im, b_im.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.conjugate().array();
+    }
 
     cuda_complex_conj_mul_f32(d_out_re, d_out_im, d_a_re, d_a_im, d_b_re, d_b_im, n);
 
     std::vector<float> out_re(n), out_im(n);
-    cudaMemcpy(out_re.data(), d_out_re, n * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(out_im.data(), d_out_im, n * sizeof(float), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(out_re.data(), d_out_re, n * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.conjugate().array();
+    }
+    err = cudaMemcpy(out_im.data(), d_out_im, n * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array() * b.conjugate().array();
+    }
 
     for (size_t i = 0; i < n; ++i) {
         result[i] = std::complex<float>(out_re[i], out_im[i]);
     }
 
-    cudaFree(d_a_re);
-    cudaFree(d_a_im);
-    cudaFree(d_b_re);
-    cudaFree(d_b_im);
-    cudaFree(d_out_re);
-    cudaFree(d_out_im);
+    cleanup();
 #else
     result = a.array() * b.conjugate().array();
 #endif
@@ -510,13 +653,55 @@ std::complex<float> cuda_complex_dot(const Eigen::VectorXcf& a, const Eigen::Vec
 
     size_t n = a.size();
 
-    float *d_a_re, *d_a_im, *d_b_re, *d_b_im, *d_out_re, *d_out_im;
-    cudaMalloc(&d_a_re, n * sizeof(float));
-    cudaMalloc(&d_a_im, n * sizeof(float));
-    cudaMalloc(&d_b_re, n * sizeof(float));
-    cudaMalloc(&d_b_im, n * sizeof(float));
-    cudaMalloc(&d_out_re, sizeof(float));
-    cudaMalloc(&d_out_im, sizeof(float));
+    float *d_a_re = nullptr, *d_a_im = nullptr, *d_b_re = nullptr;
+    float *d_b_im = nullptr, *d_out_re = nullptr, *d_out_im = nullptr;
+
+    auto cleanup = [&]() {
+        if (d_a_re) cudaFree(d_a_re);
+        if (d_a_im) cudaFree(d_a_im);
+        if (d_b_re) cudaFree(d_b_re);
+        if (d_b_im) cudaFree(d_b_im);
+        if (d_out_re) cudaFree(d_out_re);
+        if (d_out_im) cudaFree(d_out_im);
+    };
+
+    cudaError_t err;
+    err = cudaMalloc(&d_a_re, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.dot(b);
+    }
+    err = cudaMalloc(&d_a_im, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.dot(b);
+    }
+    err = cudaMalloc(&d_b_re, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.dot(b);
+    }
+    err = cudaMalloc(&d_b_im, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.dot(b);
+    }
+    err = cudaMalloc(&d_out_re, sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.dot(b);
+    }
+    err = cudaMalloc(&d_out_im, sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.dot(b);
+    }
 
     std::vector<float> a_re(n), a_im(n), b_re(n), b_im(n);
     for (size_t i = 0; i < n; ++i) {
@@ -526,23 +711,48 @@ std::complex<float> cuda_complex_dot(const Eigen::VectorXcf& a, const Eigen::Vec
         b_im[i] = b[i].imag();
     }
 
-    cudaMemcpy(d_a_re, a_re.data(), n * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_a_im, a_im.data(), n * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b_re, b_re.data(), n * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b_im, b_im.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    err = cudaMemcpy(d_a_re, a_re.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.dot(b);
+    }
+    err = cudaMemcpy(d_a_im, a_im.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.dot(b);
+    }
+    err = cudaMemcpy(d_b_re, b_re.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.dot(b);
+    }
+    err = cudaMemcpy(d_b_im, b_im.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.dot(b);
+    }
 
     cuda_complex_dot_f32(d_out_re, d_out_im, d_a_re, d_a_im, d_b_re, d_b_im, n);
 
     float out_re, out_im;
-    cudaMemcpy(&out_re, d_out_re, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&out_im, d_out_im, sizeof(float), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(&out_re, d_out_re, sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.dot(b);
+    }
+    err = cudaMemcpy(&out_im, d_out_im, sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.dot(b);
+    }
 
-    cudaFree(d_a_re);
-    cudaFree(d_a_im);
-    cudaFree(d_b_re);
-    cudaFree(d_b_im);
-    cudaFree(d_out_re);
-    cudaFree(d_out_im);
+    cleanup();
 
     return std::complex<float>(out_re, out_im);
 #else
@@ -557,10 +767,33 @@ Eigen::VectorXf cuda_complex_magnitude(const Eigen::VectorXcf& a) {
 #ifdef OPTMATH_USE_CUDA
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
-    float *d_re, *d_im, *d_out;
-    cudaMalloc(&d_re, n * sizeof(float));
-    cudaMalloc(&d_im, n * sizeof(float));
-    cudaMalloc(&d_out, n * sizeof(float));
+    float *d_re = nullptr, *d_im = nullptr, *d_out = nullptr;
+
+    auto cleanup = [&]() {
+        if (d_re) cudaFree(d_re);
+        if (d_im) cudaFree(d_im);
+        if (d_out) cudaFree(d_out);
+    };
+
+    cudaError_t err;
+    err = cudaMalloc(&d_re, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array().abs();
+    }
+    err = cudaMalloc(&d_im, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array().abs();
+    }
+    err = cudaMalloc(&d_out, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array().abs();
+    }
 
     std::vector<float> re(n), im(n);
     for (size_t i = 0; i < n; ++i) {
@@ -568,16 +801,29 @@ Eigen::VectorXf cuda_complex_magnitude(const Eigen::VectorXcf& a) {
         im[i] = a[i].imag();
     }
 
-    cudaMemcpy(d_re, re.data(), n * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_im, im.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    err = cudaMemcpy(d_re, re.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array().abs();
+    }
+    err = cudaMemcpy(d_im, im.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array().abs();
+    }
 
     cuda_complex_magnitude_f32(d_out, d_re, d_im, n);
 
-    cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array().abs();
+    }
 
-    cudaFree(d_re);
-    cudaFree(d_im);
-    cudaFree(d_out);
+    cleanup();
 #else
     result = a.array().abs();
 #endif
@@ -592,10 +838,33 @@ Eigen::VectorXf cuda_complex_phase(const Eigen::VectorXcf& a) {
 #ifdef OPTMATH_USE_CUDA
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
-    float *d_re, *d_im, *d_out;
-    cudaMalloc(&d_re, n * sizeof(float));
-    cudaMalloc(&d_im, n * sizeof(float));
-    cudaMalloc(&d_out, n * sizeof(float));
+    float *d_re = nullptr, *d_im = nullptr, *d_out = nullptr;
+
+    auto cleanup = [&]() {
+        if (d_re) cudaFree(d_re);
+        if (d_im) cudaFree(d_im);
+        if (d_out) cudaFree(d_out);
+    };
+
+    cudaError_t err;
+    err = cudaMalloc(&d_re, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array().arg();
+    }
+    err = cudaMalloc(&d_im, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array().arg();
+    }
+    err = cudaMalloc(&d_out, n * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array().arg();
+    }
 
     std::vector<float> re(n), im(n);
     for (size_t i = 0; i < n; ++i) {
@@ -603,16 +872,29 @@ Eigen::VectorXf cuda_complex_phase(const Eigen::VectorXcf& a) {
         im[i] = a[i].imag();
     }
 
-    cudaMemcpy(d_re, re.data(), n * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_im, im.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    err = cudaMemcpy(d_re, re.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array().arg();
+    }
+    err = cudaMemcpy(d_im, im.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array().arg();
+    }
 
     cuda_complex_phase_f32(d_out, d_re, d_im, n);
 
-    cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return a.array().arg();
+    }
 
-    cudaFree(d_re);
-    cudaFree(d_im);
-    cudaFree(d_out);
+    cleanup();
 #else
     result = a.array().arg();
 #endif
@@ -682,13 +964,31 @@ Eigen::VectorXcf cuda_fft(const Eigen::VectorXcf& x) {
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
     // Copy to device (interleaved format)
-    float* d_data;
-    cudaMalloc(&d_data, n * 2 * sizeof(float));
-    cudaMemcpy(d_data, x.data(), n * 2 * sizeof(float), cudaMemcpyHostToDevice);
+    float* d_data = nullptr;
+    cudaError_t err;
+
+    err = cudaMalloc(&d_data, n * 2 * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        return x;  // Fallback: return input unchanged
+    }
+
+    err = cudaMemcpy(d_data, x.data(), n * 2 * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cudaFree(d_data);
+        return x;
+    }
 
     cuda_fft_1d_f32(d_data, n, false);
 
-    cudaMemcpy(result.data(), d_data, n * 2 * sizeof(float), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(result.data(), d_data, n * 2 * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cudaFree(d_data);
+        return x;
+    }
+
     cudaFree(d_data);
 #else
     // Fallback: would need Eigen FFT or similar
@@ -705,9 +1005,21 @@ Eigen::VectorXcf cuda_ifft(const Eigen::VectorXcf& x) {
 #ifdef OPTMATH_USE_CUDA
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
-    float* d_data;
-    cudaMalloc(&d_data, n * 2 * sizeof(float));
-    cudaMemcpy(d_data, x.data(), n * 2 * sizeof(float), cudaMemcpyHostToDevice);
+    float* d_data = nullptr;
+    cudaError_t err;
+
+    err = cudaMalloc(&d_data, n * 2 * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        return x;  // Fallback: return input unchanged
+    }
+
+    err = cudaMemcpy(d_data, x.data(), n * 2 * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cudaFree(d_data);
+        return x;
+    }
 
     cuda_fft_1d_f32(d_data, n, true);
 
@@ -716,7 +1028,12 @@ Eigen::VectorXcf cuda_ifft(const Eigen::VectorXcf& x) {
     int blocks = div_ceil(n * 2, BLOCK_SIZE);
     // Would need a scale kernel here
 
-    cudaMemcpy(result.data(), d_data, n * 2 * sizeof(float), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(result.data(), d_data, n * 2 * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cudaFree(d_data);
+        return x;
+    }
 
     // Normalize on CPU for now
     result /= static_cast<float>(n);
@@ -763,35 +1080,76 @@ Eigen::VectorXf cuda_conv1d(const Eigen::VectorXf& signal, const Eigen::VectorXf
     size_t out_len = sig_len + kern_len - 1;
     Eigen::VectorXf result(out_len);
 
+    // CPU fallback implementation
+    auto cpu_conv1d = [&]() {
+        result.setZero();
+        for (size_t i = 0; i < out_len; ++i) {
+            for (size_t k = 0; k < kern_len; ++k) {
+                int sig_idx = static_cast<int>(i) - static_cast<int>(k);
+                if (sig_idx >= 0 && sig_idx < static_cast<int>(sig_len)) {
+                    result[i] += signal[sig_idx] * kernel[k];
+                }
+            }
+        }
+        return result;
+    };
+
 #ifdef OPTMATH_USE_CUDA
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
-    float *d_signal, *d_kernel, *d_out;
-    cudaMalloc(&d_signal, sig_len * sizeof(float));
-    cudaMalloc(&d_kernel, kern_len * sizeof(float));
-    cudaMalloc(&d_out, out_len * sizeof(float));
+    float *d_signal = nullptr, *d_kernel = nullptr, *d_out = nullptr;
 
-    cudaMemcpy(d_signal, signal.data(), sig_len * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_kernel, kernel.data(), kern_len * sizeof(float), cudaMemcpyHostToDevice);
+    auto cleanup = [&]() {
+        if (d_signal) cudaFree(d_signal);
+        if (d_kernel) cudaFree(d_kernel);
+        if (d_out) cudaFree(d_out);
+    };
+
+    cudaError_t err;
+    err = cudaMalloc(&d_signal, sig_len * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return cpu_conv1d();
+    }
+    err = cudaMalloc(&d_kernel, kern_len * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return cpu_conv1d();
+    }
+    err = cudaMalloc(&d_out, out_len * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return cpu_conv1d();
+    }
+
+    err = cudaMemcpy(d_signal, signal.data(), sig_len * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return cpu_conv1d();
+    }
+    err = cudaMemcpy(d_kernel, kernel.data(), kern_len * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return cpu_conv1d();
+    }
 
     cuda_conv1d_f32(d_out, d_signal, d_kernel, sig_len, kern_len);
 
-    cudaMemcpy(result.data(), d_out, out_len * sizeof(float), cudaMemcpyDeviceToHost);
-
-    cudaFree(d_signal);
-    cudaFree(d_kernel);
-    cudaFree(d_out);
-#else
-    // Fallback: naive convolution
-    result.setZero();
-    for (size_t i = 0; i < out_len; ++i) {
-        for (size_t k = 0; k < kern_len; ++k) {
-            int sig_idx = static_cast<int>(i) - static_cast<int>(k);
-            if (sig_idx >= 0 && sig_idx < static_cast<int>(sig_len)) {
-                result[i] += signal[sig_idx] * kernel[k];
-            }
-        }
+    err = cudaMemcpy(result.data(), d_out, out_len * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return cpu_conv1d();
     }
+
+    cleanup();
+#else
+    return cpu_conv1d();
 #endif
 
     return result;
@@ -806,38 +1164,79 @@ Eigen::MatrixXf cuda_conv2d(const Eigen::MatrixXf& image, const Eigen::MatrixXf&
     int out_w = img_w - kern_w + 1;
     Eigen::MatrixXf result(out_h, out_w);
 
+    // CPU fallback implementation
+    auto cpu_conv2d = [&]() {
+        result.setZero();
+        for (int r = 0; r < out_h; ++r) {
+            for (int c = 0; c < out_w; ++c) {
+                float sum = 0.0f;
+                for (int kh = 0; kh < kern_h; ++kh) {
+                    for (int kw = 0; kw < kern_w; ++kw) {
+                        sum += image(r + kh, c + kw) * kernel(kh, kw);
+                    }
+                }
+                result(r, c) = sum;
+            }
+        }
+        return result;
+    };
+
 #ifdef OPTMATH_USE_CUDA
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
-    float *d_image, *d_kernel, *d_out;
-    cudaMalloc(&d_image, img_h * img_w * sizeof(float));
-    cudaMalloc(&d_kernel, kern_h * kern_w * sizeof(float));
-    cudaMalloc(&d_out, out_h * out_w * sizeof(float));
+    float *d_image = nullptr, *d_kernel = nullptr, *d_out = nullptr;
 
-    cudaMemcpy(d_image, image.data(), img_h * img_w * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_kernel, kernel.data(), kern_h * kern_w * sizeof(float), cudaMemcpyHostToDevice);
+    auto cleanup = [&]() {
+        if (d_image) cudaFree(d_image);
+        if (d_kernel) cudaFree(d_kernel);
+        if (d_out) cudaFree(d_out);
+    };
+
+    cudaError_t err;
+    err = cudaMalloc(&d_image, img_h * img_w * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return cpu_conv2d();
+    }
+    err = cudaMalloc(&d_kernel, kern_h * kern_w * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return cpu_conv2d();
+    }
+    err = cudaMalloc(&d_out, out_h * out_w * sizeof(float));
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return cpu_conv2d();
+    }
+
+    err = cudaMemcpy(d_image, image.data(), img_h * img_w * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return cpu_conv2d();
+    }
+    err = cudaMemcpy(d_kernel, kernel.data(), kern_h * kern_w * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return cpu_conv2d();
+    }
 
     cuda_conv2d_f32(d_out, d_image, d_kernel, img_h, img_w, kern_h, kern_w);
 
-    cudaMemcpy(result.data(), d_out, out_h * out_w * sizeof(float), cudaMemcpyDeviceToHost);
-
-    cudaFree(d_image);
-    cudaFree(d_kernel);
-    cudaFree(d_out);
-#else
-    // Fallback
-    result.setZero();
-    for (int r = 0; r < out_h; ++r) {
-        for (int c = 0; c < out_w; ++c) {
-            float sum = 0.0f;
-            for (int kh = 0; kh < kern_h; ++kh) {
-                for (int kw = 0; kw < kern_w; ++kw) {
-                    sum += image(r + kh, c + kw) * kernel(kh, kw);
-                }
-            }
-            result(r, c) = sum;
-        }
+    err = cudaMemcpy(result.data(), d_out, out_h * out_w * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        cleanup();
+        return cpu_conv2d();
     }
+
+    cleanup();
+#else
+    return cpu_conv2d();
 #endif
 
     return result;

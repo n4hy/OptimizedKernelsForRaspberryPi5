@@ -7,6 +7,7 @@
 #include <cmath>
 #include <filesystem>
 #include <map>
+#include <mutex>
 
 namespace optmath {
 namespace vulkan {
@@ -186,8 +187,13 @@ bool VulkanContext::init() {
     return true;
 }
 
+// Forward declaration for cleanup
+static void cleanupPipelineCache(VkDevice device);
+
 void VulkanContext::cleanup() {
     if (device) {
+        // Cleanup pipeline cache before destroying device
+        cleanupPipelineCache(device);
         vkDestroyCommandPool(device, commandPool, nullptr);
         vkDestroyDevice(device, nullptr);
         device = VK_NULL_HANDLE;
@@ -225,8 +231,30 @@ struct PipelineState {
 
 // Map shader name to pipeline state
 static std::map<std::string, PipelineState> g_pipelineCache;
+static std::mutex g_pipelineCacheMutex;
+
+static void cleanupPipelineCache(VkDevice device) {
+    std::lock_guard<std::mutex> lock(g_pipelineCacheMutex);
+    for (auto& [name, state] : g_pipelineCache) {
+        if (state.pipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, state.pipeline, nullptr);
+        }
+        if (state.layout != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device, state.layout, nullptr);
+        }
+        if (state.descLayout != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(device, state.descLayout, nullptr);
+        }
+        if (state.shaderModule != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(device, state.shaderModule, nullptr);
+        }
+    }
+    g_pipelineCache.clear();
+}
 
 static PipelineState getOrCreatePipeline(const std::string& shaderName, size_t bufferCount, size_t pushConstSize) {
+    std::lock_guard<std::mutex> lock(g_pipelineCacheMutex);
+
     if (g_pipelineCache.count(shaderName)) {
         return g_pipelineCache[shaderName];
     }
@@ -242,7 +270,9 @@ static PipelineState getOrCreatePipeline(const std::string& shaderName, size_t b
     createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
 
     VkShaderModule shaderModule;
-    if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
+    VkResult result = vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule);
+    if (result != VK_SUCCESS) {
+        std::cerr << "[Vulkan] Failed to create shader module for " << shaderName << ": " << result << std::endl;
         throw std::runtime_error("failed to create shader module for " + shaderName);
     }
 
@@ -262,7 +292,12 @@ static PipelineState getOrCreatePipeline(const std::string& shaderName, size_t b
     layoutInfo.pBindings = bindings.data();
 
     VkDescriptorSetLayout descriptorSetLayout;
-    vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout);
+    result = vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout);
+    if (result != VK_SUCCESS) {
+        std::cerr << "[Vulkan] Failed to create descriptor set layout: " << result << std::endl;
+        vkDestroyShaderModule(device, shaderModule, nullptr);
+        throw std::runtime_error("failed to create descriptor set layout");
+    }
 
     VkPushConstantRange pushConstantRange{};
     pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -279,7 +314,13 @@ static PipelineState getOrCreatePipeline(const std::string& shaderName, size_t b
     }
 
     VkPipelineLayout pipelineLayout;
-    vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout);
+    result = vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout);
+    if (result != VK_SUCCESS) {
+        std::cerr << "[Vulkan] Failed to create pipeline layout: " << result << std::endl;
+        vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
+        vkDestroyShaderModule(device, shaderModule, nullptr);
+        throw std::runtime_error("failed to create pipeline layout");
+    }
 
     VkPipelineShaderStageCreateInfo shaderStageInfo{};
     shaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -293,7 +334,14 @@ static PipelineState getOrCreatePipeline(const std::string& shaderName, size_t b
     pipelineInfo.layout = pipelineLayout;
 
     VkPipeline computePipeline;
-    vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline);
+    result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline);
+    if (result != VK_SUCCESS) {
+        std::cerr << "[Vulkan] Failed to create compute pipeline: " << result << std::endl;
+        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
+        vkDestroyShaderModule(device, shaderModule, nullptr);
+        throw std::runtime_error("failed to create compute pipeline");
+    }
 
     PipelineState state = {computePipeline, pipelineLayout, descriptorSetLayout, shaderModule};
     g_pipelineCache[shaderName] = state;
@@ -357,7 +405,11 @@ static void run_compute(const std::string& shaderName,
     poolInfo.maxSets = 1;
 
     VkDescriptorPool descriptorPool;
-    vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool);
+    VkResult result = vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool);
+    if (result != VK_SUCCESS) {
+        std::cerr << "[Vulkan] Failed to create descriptor pool: " << result << std::endl;
+        throw std::runtime_error("failed to create descriptor pool");
+    }
 
     VkDescriptorSet descriptorSet;
     VkDescriptorSetAllocateInfo allocInfo{};
@@ -366,7 +418,12 @@ static void run_compute(const std::string& shaderName,
     allocInfo.descriptorSetCount = 1;
     allocInfo.pSetLayouts = &state.descLayout;
 
-    vkAllocateDescriptorSets(device, &allocInfo, &descriptorSet);
+    result = vkAllocateDescriptorSets(device, &allocInfo, &descriptorSet);
+    if (result != VK_SUCCESS) {
+        std::cerr << "[Vulkan] Failed to allocate descriptor sets: " << result << std::endl;
+        vkDestroyDescriptorPool(device, descriptorPool, nullptr);
+        throw std::runtime_error("failed to allocate descriptor sets");
+    }
 
     std::vector<VkDescriptorBufferInfo> bufferInfos(buffers.size());
     std::vector<VkWriteDescriptorSet> descriptorWrites(buffers.size());
@@ -407,6 +464,16 @@ static void run_compute(const std::string& shaderName,
         vkCmdPushConstants(commandBuffer, state.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, pushConstSize, pushConstData);
     }
     vkCmdDispatch(commandBuffer, groupCountX, groupCountY, groupCountZ);
+
+    // Pipeline barrier to ensure compute shader writes are visible before host reads
+    VkMemoryBarrier memBarrier{};
+    memBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+                         0, 1, &memBarrier, 0, nullptr, 0, nullptr);
+
     vkEndCommandBuffer(commandBuffer);
 
     // Submit and Wait
@@ -421,8 +488,8 @@ static void run_compute(const std::string& shaderName,
     // Cleanup Command Buffer & Descriptor Pool (Pipeline is cached)
     vkFreeCommandBuffers(device, ctx.commandPool, 1, &commandBuffer);
     vkDestroyDescriptorPool(device, descriptorPool, nullptr);
-    // Note: We do not destroy pipeline/layout here as they are cached.
-    // They will leak at shutdown in this simple implementation, which is acceptable for a singleton.
+    // Note: Pipeline/layout/descriptor set layout/shader module are cached in g_pipelineCache
+    // and cleaned up in VulkanContext::cleanup() via cleanupPipelineCache().
 }
 
 // -----------------------------------------------------------------------------
