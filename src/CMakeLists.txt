@@ -1,6 +1,9 @@
 # Sources
 set(SOURCES
     neon/neon_kernels.cpp
+    neon/neon_complex.cpp
+    neon/neon_gemm_optimized.cpp
+    neon/neon_radar.cpp
     vulkan/vulkan_backend.cpp
 )
 
@@ -10,32 +13,50 @@ if(ENABLE_VULKAN)
     if(GLSLANG_VALIDATOR)
         # Define shaders to compile
         set(SHADERS
+            # Vector operations
             vec_add.comp.glsl
             vec_sub.comp.glsl
             vec_mul.comp.glsl
             vec_div.comp.glsl
             vec_dot.comp.glsl
             vec_norm.comp.glsl
+            # Matrix operations
             mat_add.comp.glsl
             mat_sub.comp.glsl
             mat_mul.comp.glsl
+            mat_mul_tiled.comp.glsl
             mat_transpose.comp.glsl
             mat_scale.comp.glsl
             mat_vec_mul.comp.glsl
             mat_outer_product.comp.glsl
             mat_elementwise_mul.comp.glsl
+            # Convolution and correlation
             convolution_1d.comp.glsl
             convolution_2d.comp.glsl
+            convolution_1d_optimized.comp.glsl
+            convolution_2d_optimized.comp.glsl
             correlation_1d.comp.glsl
             correlation_2d.comp.glsl
+            # Reductions
             reduce_sum.comp.glsl
             reduce_max.comp.glsl
             reduce_min.comp.glsl
+            reduce_complete.comp.glsl
+            # Scan / Prefix sum
             scan_prefix_sum.comp.glsl
+            scan_local.comp.glsl
+            scan_block_sums.comp.glsl
+            scan_add_offsets.comp.glsl
+            # FFT
             fft_radix2.comp.glsl
+            fft_radix2_optimized.comp.glsl
             ifft_radix2.comp.glsl
             fft_radix4.comp.glsl
             ifft_radix4.comp.glsl
+            # Radar processing
+            caf_doppler_shift.comp.glsl
+            caf_xcorr.comp.glsl
+            cfar_2d.comp.glsl
         )
 
         set(SPV_OUTPUTS "")

@@ -14,10 +14,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 include(GNUInstallDirs)
 
 # Options
-option(ENABLE_NEON    "Enable NEON-optimized kernels" ON)
-option(ENABLE_VULKAN  "Enable Vulkan-based kernels"   ON)
-option(BUILD_EXAMPLES "Build examples"                ON)
-option(BUILD_TESTS    "Build tests"                   ON)
+option(ENABLE_NEON      "Enable NEON-optimized kernels" ON)
+option(ENABLE_VULKAN    "Enable Vulkan-based kernels"   ON)
+option(BUILD_EXAMPLES   "Build examples"                ON)
+option(BUILD_TESTS      "Build tests"                   ON)
+option(BUILD_BENCHMARKS "Build benchmarks"              OFF)
 
 # --- Dependencies ---
 
@@ -102,4 +103,8 @@ endif()
 if(BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+if(BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
 endif()

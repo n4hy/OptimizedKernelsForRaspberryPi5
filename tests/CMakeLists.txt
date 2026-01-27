@@ -31,3 +31,19 @@ add_test(NAME test_vulkan_advanced COMMAND test_vulkan_advanced)
 add_executable(test_neon_kernels test_neon_kernels.cpp)
 target_link_libraries(test_neon_kernels PRIVATE OptMathKernels::OptMathKernels gtest gtest_main)
 add_test(NAME test_neon_kernels COMMAND test_neon_kernels)
+
+add_executable(test_neon_complex test_neon_complex.cpp)
+target_link_libraries(test_neon_complex PRIVATE OptMathKernels::OptMathKernels gtest gtest_main)
+add_test(NAME test_neon_complex COMMAND test_neon_complex)
+
+add_executable(test_neon_transcendentals test_neon_transcendentals.cpp)
+target_link_libraries(test_neon_transcendentals PRIVATE OptMathKernels::OptMathKernels gtest gtest_main)
+add_test(NAME test_neon_transcendentals COMMAND test_neon_transcendentals)
+
+add_executable(test_radar_caf test_radar_caf.cpp)
+target_link_libraries(test_radar_caf PRIVATE OptMathKernels::OptMathKernels gtest gtest_main)
+add_test(NAME test_radar_caf COMMAND test_radar_caf)
+
+add_executable(test_radar_cfar test_radar_cfar.cpp)
+target_link_libraries(test_radar_cfar PRIVATE OptMathKernels::OptMathKernels gtest gtest_main)
+add_test(NAME test_radar_cfar COMMAND test_radar_cfar)
