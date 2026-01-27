@@ -7,6 +7,20 @@ set(SOURCES
     vulkan/vulkan_backend.cpp
 )
 
+# CUDA sources (added conditionally)
+if(ENABLE_CUDA)
+    set(CUDA_SOURCES
+        cuda/cuda_backend.cpp
+        cuda/cuda_kernels.cu
+        cuda/cuda_complex.cu
+        cuda/cuda_radar.cu
+    )
+    list(APPEND SOURCES ${CUDA_SOURCES})
+
+    # Set CUDA-specific properties
+    set_source_files_properties(${CUDA_SOURCES} PROPERTIES LANGUAGE CUDA)
+endif()
+
 if(ENABLE_VULKAN)
     # Shader compilation logic
     find_program(GLSLANG_VALIDATOR glslangValidator)
@@ -109,6 +123,28 @@ if(ENABLE_VULKAN)
     if(GLSLANG_VALIDATOR)
         add_dependencies(OptMathKernels optmath_shaders)
     endif()
+endif()
+
+# CUDA libraries
+if(ENABLE_CUDA)
+    target_link_libraries(OptMathKernels PRIVATE
+        CUDA::cudart
+        CUDA::cublas
+        CUDA::cufft
+        CUDA::cusolver
+    )
+
+    # Set CUDA properties on the library
+    set_target_properties(OptMathKernels PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    )
+
+    # Enable CUDA fast math optimizations (optional, improves performance)
+    target_compile_options(OptMathKernels PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -O3>
+    )
 endif()
 
 # Installation

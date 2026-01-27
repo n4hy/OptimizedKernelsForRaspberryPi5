@@ -1,9 +1,13 @@
 cmake_minimum_required(VERSION 3.18)
 
 project(OptMathKernels
-    VERSION 0.1.0
+    VERSION 0.2.0
     LANGUAGES CXX
 )
+
+# Check for CUDA support early (before setting standards)
+include(CheckLanguage)
+check_language(CUDA)
 
 # Enforce C++20
 set(CMAKE_CXX_STANDARD 20)
@@ -14,11 +18,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 include(GNUInstallDirs)
 
 # Options
-option(ENABLE_NEON      "Enable NEON-optimized kernels" ON)
-option(ENABLE_VULKAN    "Enable Vulkan-based kernels"   ON)
-option(BUILD_EXAMPLES   "Build examples"                ON)
-option(BUILD_TESTS      "Build tests"                   ON)
-option(BUILD_BENCHMARKS "Build benchmarks"              OFF)
+option(ENABLE_NEON      "Enable NEON-optimized kernels"     ON)
+option(ENABLE_VULKAN    "Enable Vulkan-based kernels"       ON)
+option(ENABLE_CUDA      "Enable NVIDIA CUDA-based kernels"  ON)
+option(BUILD_EXAMPLES   "Build examples"                    ON)
+option(BUILD_TESTS      "Build tests"                       ON)
+option(BUILD_BENCHMARKS "Build benchmarks"                  OFF)
 
 # --- Dependencies ---
 
@@ -73,6 +78,39 @@ if(ENABLE_VULKAN)
     endif()
 endif()
 
+# 3. CUDA (NVIDIA GPU support)
+if(ENABLE_CUDA)
+    if(CMAKE_CUDA_COMPILER)
+        enable_language(CUDA)
+        find_package(CUDAToolkit)
+        if(CUDAToolkit_FOUND)
+            message(STATUS "CUDA found: ${CUDAToolkit_VERSION}")
+            message(STATUS "  CUDA Libraries: ${CUDAToolkit_LIBRARY_DIR}")
+
+            # Set CUDA standard
+            set(CMAKE_CUDA_STANDARD 17)
+            set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+            # Detect GPU architecture
+            # Default to common architectures if not specified
+            if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+                # Support Pascal (60), Volta (70), Turing (75), Ampere (80,86), Ada (89), Hopper (90)
+                set(CMAKE_CUDA_ARCHITECTURES "60;70;75;80;86;89;90")
+                message(STATUS "  CUDA Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+            endif()
+
+            # Add CUDA compile definitions
+            add_compile_definitions(OPTMATH_USE_CUDA)
+        else()
+            message(WARNING "CUDA Toolkit not found. Disabling CUDA support.")
+            set(ENABLE_CUDA OFF)
+        endif()
+    else()
+        message(WARNING "CUDA compiler not found. Disabling CUDA support.")
+        set(ENABLE_CUDA OFF)
+    endif()
+endif()
+
 # --- ARM / Pi 5 Detection ---
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "arm" OR CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
     set(ON_ARM TRUE)
@@ -92,6 +130,8 @@ endif()
 if (ENABLE_VULKAN)
     add_compile_definitions(OPTMATH_USE_VULKAN)
 endif()
+
+# CUDA definitions already added in detection section above
 
 # --- Subdirectories ---
 add_subdirectory(src)
