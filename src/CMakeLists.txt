@@ -144,7 +144,19 @@ if(ENABLE_CUDA)
     target_compile_options(OptMathKernels PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
         $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -O3>
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+        $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>
     )
+
+    # Blackwell (RTX 5090) specific optimizations
+    if("100" IN_LIST CMAKE_CUDA_ARCHITECTURES)
+        target_compile_options(OptMathKernels PRIVATE
+            # Maximum register usage for Blackwell's larger register file
+            $<$<COMPILE_LANGUAGE:CUDA>:-maxrregcount=255>
+            # Enable all PTX optimizations
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas --allow-expensive-optimizations=true>
+        )
+    endif()
 endif()
 
 # Installation

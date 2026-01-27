@@ -122,11 +122,17 @@ DeviceInfo get_device_info(int device_id) {
     info.memory_bandwidth_gbps = 2.0f * prop.memoryClockRate *
                                   (prop.memoryBusWidth / 8) / 1.0e6f;
 
-    // Feature detection
+    // Shared memory info
+    info.shared_memory_per_block = prop.sharedMemPerBlock;
+    info.shared_memory_per_multiprocessor = prop.sharedMemPerMultiprocessor;
+
+    // Feature detection based on compute capability
     int cc = prop.major * 10 + prop.minor;
     info.fp16_support = (cc >= 60);        // Pascal+
     info.tensor_cores = (cc >= 70);        // Volta+
     info.tf32_support = (cc >= 80);        // Ampere+
+    info.fp8_support = (cc >= 100);        // Blackwell+ (RTX 5090)
+    info.blackwell = (cc >= 100);          // Blackwell architecture
     info.unified_memory = (prop.managedMemory != 0);
 
     // Get free memory
@@ -156,10 +162,14 @@ void print_device_info(int device_id) {
     std::cout << "Warp Size: " << info.warp_size << std::endl;
     std::cout << "Memory Bandwidth: " << info.memory_bandwidth_gbps << " GB/s" << std::endl;
     std::cout << "L2 Cache: " << (info.l2_cache_size / 1024) << " KB" << std::endl;
+    std::cout << "Shared Memory/Block: " << (info.shared_memory_per_block / 1024) << " KB" << std::endl;
+    std::cout << "Shared Memory/SM: " << (info.shared_memory_per_multiprocessor / 1024) << " KB" << std::endl;
     std::cout << "Features:" << std::endl;
     std::cout << "  FP16: " << (info.fp16_support ? "Yes" : "No") << std::endl;
     std::cout << "  Tensor Cores: " << (info.tensor_cores ? "Yes" : "No") << std::endl;
     std::cout << "  TF32: " << (info.tf32_support ? "Yes" : "No") << std::endl;
+    std::cout << "  FP8: " << (info.fp8_support ? "Yes" : "No") << std::endl;
+    std::cout << "  Blackwell: " << (info.blackwell ? "Yes" : "No") << std::endl;
     std::cout << "  Unified Memory: " << (info.unified_memory ? "Yes" : "No") << std::endl;
 }
 

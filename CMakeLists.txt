@@ -94,9 +94,27 @@ if(ENABLE_CUDA)
             # Detect GPU architecture
             # Default to common architectures if not specified
             if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-                # Support Pascal (60), Volta (70), Turing (75), Ampere (80,86), Ada (89), Hopper (90)
-                set(CMAKE_CUDA_ARCHITECTURES "60;70;75;80;86;89;90")
+                # RTX 2000 (Turing 75), RTX 3000 (Ampere 80,86), RTX 4000 (Ada 89), RTX 5000 (Blackwell 100)
+                set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;100")
                 message(STATUS "  CUDA Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+            endif()
+
+            # Architecture-specific optimizations
+            if("100" IN_LIST CMAKE_CUDA_ARCHITECTURES)
+                message(STATUS "  Blackwell (SM 100) enabled - RTX 5090/5080 optimizations active")
+                add_compile_definitions(OPTMATH_CUDA_BLACKWELL)
+            endif()
+            if("89" IN_LIST CMAKE_CUDA_ARCHITECTURES)
+                message(STATUS "  Ada Lovelace (SM 89) enabled - RTX 4090/4080/4070 support")
+                add_compile_definitions(OPTMATH_CUDA_ADA)
+            endif()
+            if("86" IN_LIST CMAKE_CUDA_ARCHITECTURES OR "80" IN_LIST CMAKE_CUDA_ARCHITECTURES)
+                message(STATUS "  Ampere (SM 80/86) enabled - RTX 3090/3080/3070 support")
+                add_compile_definitions(OPTMATH_CUDA_AMPERE)
+            endif()
+            if("75" IN_LIST CMAKE_CUDA_ARCHITECTURES)
+                message(STATUS "  Turing (SM 75) enabled - RTX 2080/2070/2060 support")
+                add_compile_definitions(OPTMATH_CUDA_TURING)
             endif()
 
             # Add CUDA compile definitions

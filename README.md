@@ -119,12 +119,16 @@ nvcc --version
 nvidia-smi
 ```
 
-Supported architectures:
-- Pascal (SM 6.0): GTX 1000 series
+Supported RTX architectures (default build):
+| Architecture | SM | GPUs | Features |
+|--------------|-----|------|----------|
+| **Turing** | 7.5 | RTX 2080 Ti, 2080, 2070, 2060 | Tensor Cores Gen 1 |
+| **Ampere** | 8.0/8.6 | RTX 3090, 3080, 3070, 3060 | Tensor Cores Gen 3, TF32 |
+| **Ada Lovelace** | 8.9 | RTX 4090, 4080, 4070, 4060 | Tensor Cores Gen 4, FP8 |
+| **Blackwell** | 10.0 | **RTX 5090**, 5080, 5070 | Tensor Cores Gen 5, FP8, 32GB |
+
+Data center GPUs (add manually):
 - Volta (SM 7.0): V100, Titan V
-- Turing (SM 7.5): RTX 2000 series
-- Ampere (SM 8.0/8.6): RTX 3000 series, A100
-- Ada Lovelace (SM 8.9): RTX 4000 series
 - Hopper (SM 9.0): H100
 
 > **Note:** GoogleTest and Google Benchmark are automatically fetched during the build (via CMake `FetchContent`).

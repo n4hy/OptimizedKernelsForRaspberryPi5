@@ -68,10 +68,14 @@ struct DeviceInfo {
     bool tensor_cores;           // Volta+ (SM 7.0+)
     bool tf32_support;           // Ampere+ (SM 8.0+)
     bool fp16_support;           // Pascal+ (SM 6.0+)
+    bool fp8_support;            // Blackwell (SM 10.0+) - RTX 5090
+    bool blackwell;              // Blackwell architecture (SM 10.0+)
     bool unified_memory;
     int memory_bus_width;
     float memory_bandwidth_gbps;
     int l2_cache_size;
+    size_t shared_memory_per_block;      // Blackwell has 228KB per SM
+    size_t shared_memory_per_multiprocessor;
 
     // Short aliases for convenience
     int compute_major() const { return compute_capability_major; }
@@ -80,6 +84,15 @@ struct DeviceInfo {
     bool has_tensor_cores() const { return tensor_cores; }
     bool has_tf32() const { return tf32_support; }
     bool has_fp16() const { return fp16_support; }
+    bool has_fp8() const { return fp8_support; }
+    bool is_blackwell() const { return blackwell; }
+
+    // Architecture detection helpers
+    bool is_volta_or_newer() const { return compute_capability_major >= 7; }
+    bool is_ampere_or_newer() const { return compute_capability_major >= 8; }
+    bool is_ada_or_newer() const { return compute_capability_major >= 8 && compute_capability_minor >= 9; }
+    bool is_hopper_or_newer() const { return compute_capability_major >= 9; }
+    bool is_blackwell_or_newer() const { return compute_capability_major >= 10; }
 };
 
 /**
