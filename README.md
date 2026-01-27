@@ -289,7 +289,7 @@ nvidia-smi
 #### 1. Clone the Repository
 ```bash
 git clone https://github.com/n4hy/OptimizedKernelsForRaspberryPi5_NvidiaCUDA.git
-cd OptimizedKernelsForRaspberryPi5
+cd OptimizedKernelsForRaspberryPi5_NvidiaCUDA
 ```
 
 #### 2. Configure and Build
