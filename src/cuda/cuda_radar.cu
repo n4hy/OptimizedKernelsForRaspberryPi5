@@ -119,6 +119,55 @@ __global__ void kernel_magnitude_squared_f32(float* __restrict__ out,
     }
 }
 
+// Interleave separate real/imag arrays into complex interleaved format (zero-padded)
+__global__ void kernel_interleave_complex_f32(float* __restrict__ out_interleaved,
+                                               const float* __restrict__ in_re,
+                                               const float* __restrict__ in_im,
+                                               int n_samples,
+                                               int fft_len) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < fft_len) {
+        if (idx < n_samples) {
+            out_interleaved[2 * idx] = in_re[idx];
+            out_interleaved[2 * idx + 1] = in_im[idx];
+        } else {
+            // Zero-padding
+            out_interleaved[2 * idx] = 0.0f;
+            out_interleaved[2 * idx + 1] = 0.0f;
+        }
+    }
+}
+
+// Complex conjugate multiply in interleaved format: out = a * conj(b) * scale
+__global__ void kernel_complex_conj_mul_interleaved_f32(float* __restrict__ out,
+                                                         const float* __restrict__ a,
+                                                         const float* __restrict__ b,
+                                                         float scale,
+                                                         int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float ar = a[2 * idx];
+        float ai = a[2 * idx + 1];
+        float br = b[2 * idx];
+        float bi = -b[2 * idx + 1];  // Conjugate of b
+
+        out[2 * idx] = (ar * br - ai * bi) * scale;
+        out[2 * idx + 1] = (ar * bi + ai * br) * scale;
+    }
+}
+
+// Compute magnitude from interleaved complex and store into output row
+__global__ void kernel_magnitude_interleaved_f32(float* __restrict__ out,
+                                                   const float* __restrict__ in_interleaved,
+                                                   int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float re = in_interleaved[2 * idx];
+        float im = in_interleaved[2 * idx + 1];
+        out[idx] = sqrtf(re * re + im * im);
+    }
+}
+
 // =============================================================================
 // CFAR Kernels
 // =============================================================================
@@ -473,7 +522,7 @@ Eigen::MatrixXf cuda_caf(const Eigen::VectorXcf& ref,
     float *d_ref_re, *d_ref_im, *d_surv_re, *d_surv_im;
     float *d_shifted_re, *d_shifted_im;
     float *d_fft_ref, *d_fft_surv, *d_fft_prod;
-    float *d_range_profile;
+    float *d_caf_out;  // Full CAF output on GPU
 
     cudaMalloc(&d_ref_re, n_samples * sizeof(float));
     cudaMalloc(&d_ref_im, n_samples * sizeof(float));
@@ -484,9 +533,9 @@ Eigen::MatrixXf cuda_caf(const Eigen::VectorXcf& ref,
     cudaMalloc(&d_fft_ref, fft_len * 2 * sizeof(float));
     cudaMalloc(&d_fft_surv, fft_len * 2 * sizeof(float));
     cudaMalloc(&d_fft_prod, fft_len * 2 * sizeof(float));
-    cudaMalloc(&d_range_profile, fft_len * sizeof(float));
+    cudaMalloc(&d_caf_out, n_doppler_bins * n_range_bins * sizeof(float));
 
-    // Deinterleave and copy input signals
+    // Deinterleave and copy input signals (one-time H2D transfer)
     std::vector<float> ref_re(n_samples), ref_im(n_samples);
     std::vector<float> surv_re(n_samples), surv_im(n_samples);
 
@@ -506,17 +555,10 @@ Eigen::MatrixXf cuda_caf(const Eigen::VectorXcf& ref,
     cufftHandle fft_plan;
     cufftPlan1d(&fft_plan, static_cast<int>(fft_len), CUFFT_C2C, 1);
 
-    // Copy surveillance to FFT buffer (zero-padded)
-    cudaMemset(d_fft_surv, 0, fft_len * 2 * sizeof(float));
-    // Interleave surv to d_fft_surv
-    {
-        std::vector<float> surv_interleaved(fft_len * 2, 0.0f);
-        for (size_t i = 0; i < n_samples; ++i) {
-            surv_interleaved[2 * i] = surv_re[i];
-            surv_interleaved[2 * i + 1] = surv_im[i];
-        }
-        cudaMemcpy(d_fft_surv, surv_interleaved.data(), fft_len * 2 * sizeof(float), cudaMemcpyHostToDevice);
-    }
+    // Interleave surveillance signal on GPU (zero-padded)
+    int blocks_fft = div_ceil(fft_len, BLOCK_SIZE);
+    kernel_interleave_complex_f32<<<blocks_fft, BLOCK_SIZE>>>(
+        d_fft_surv, d_surv_re, d_surv_im, static_cast<int>(n_samples), static_cast<int>(fft_len));
 
     // FFT surveillance signal (once)
     cufftExecC2C(fft_plan,
@@ -524,35 +566,23 @@ Eigen::MatrixXf cuda_caf(const Eigen::VectorXcf& ref,
                  reinterpret_cast<cufftComplex*>(d_fft_surv),
                  CUFFT_FORWARD);
 
-    // Process each Doppler bin
-    std::vector<float> range_profile(fft_len);
+    // Precompute scale factor for normalization
+    float scale = 1.0f / fft_len;
 
+    // Process each Doppler bin - ALL OPERATIONS ON GPU
     for (size_t d = 0; d < n_doppler_bins; ++d) {
         float doppler_freq = doppler_start + d * doppler_step;
 
-        // Apply Doppler shift to reference
-        int blocks = div_ceil(n_samples, BLOCK_SIZE);
-        kernel_doppler_shift_f32<<<blocks, BLOCK_SIZE>>>(
+        // Apply Doppler shift to reference (GPU kernel)
+        int blocks_samples = div_ceil(n_samples, BLOCK_SIZE);
+        kernel_doppler_shift_f32<<<blocks_samples, BLOCK_SIZE>>>(
             d_shifted_re, d_shifted_im,
             d_ref_re, d_ref_im,
             doppler_freq, sample_rate, static_cast<int>(n_samples));
 
-        // Copy to FFT buffer (zero-padded and interleaved)
-        cudaMemset(d_fft_ref, 0, fft_len * 2 * sizeof(float));
-        // Interleave shifted ref - need to do on GPU
-        // For simplicity, using a kernel to interleave
-        {
-            std::vector<float> shifted_re_h(n_samples), shifted_im_h(n_samples);
-            cudaMemcpy(shifted_re_h.data(), d_shifted_re, n_samples * sizeof(float), cudaMemcpyDeviceToHost);
-            cudaMemcpy(shifted_im_h.data(), d_shifted_im, n_samples * sizeof(float), cudaMemcpyDeviceToHost);
-
-            std::vector<float> ref_interleaved(fft_len * 2, 0.0f);
-            for (size_t i = 0; i < n_samples; ++i) {
-                ref_interleaved[2 * i] = shifted_re_h[i];
-                ref_interleaved[2 * i + 1] = shifted_im_h[i];
-            }
-            cudaMemcpy(d_fft_ref, ref_interleaved.data(), fft_len * 2 * sizeof(float), cudaMemcpyHostToDevice);
-        }
+        // Interleave shifted reference on GPU (zero-padded)
+        kernel_interleave_complex_f32<<<blocks_fft, BLOCK_SIZE>>>(
+            d_fft_ref, d_shifted_re, d_shifted_im, static_cast<int>(n_samples), static_cast<int>(fft_len));
 
         // FFT shifted reference
         cufftExecC2C(fft_plan,
@@ -560,27 +590,9 @@ Eigen::MatrixXf cuda_caf(const Eigen::VectorXcf& ref,
                      reinterpret_cast<cufftComplex*>(d_fft_ref),
                      CUFFT_FORWARD);
 
-        // Multiply: Surv * conj(Ref)
-        // Using cuBLAS CGEMM would be faster for large FFTs
-        // For now, use simple kernel
-        {
-            std::vector<float> fft_surv_h(fft_len * 2), fft_ref_h(fft_len * 2);
-            cudaMemcpy(fft_surv_h.data(), d_fft_surv, fft_len * 2 * sizeof(float), cudaMemcpyDeviceToHost);
-            cudaMemcpy(fft_ref_h.data(), d_fft_ref, fft_len * 2 * sizeof(float), cudaMemcpyDeviceToHost);
-
-            std::vector<float> prod_h(fft_len * 2);
-            float scale = 1.0f / fft_len;
-            for (size_t i = 0; i < fft_len; ++i) {
-                float sr = fft_surv_h[2 * i];
-                float si = fft_surv_h[2 * i + 1];
-                float rr = fft_ref_h[2 * i];
-                float ri = -fft_ref_h[2 * i + 1];  // Conjugate
-
-                prod_h[2 * i] = (sr * rr - si * ri) * scale;
-                prod_h[2 * i + 1] = (sr * ri + si * rr) * scale;
-            }
-            cudaMemcpy(d_fft_prod, prod_h.data(), fft_len * 2 * sizeof(float), cudaMemcpyHostToDevice);
-        }
+        // Multiply: Surv * conj(Ref) on GPU
+        kernel_complex_conj_mul_interleaved_f32<<<blocks_fft, BLOCK_SIZE>>>(
+            d_fft_prod, d_fft_surv, d_fft_ref, scale, static_cast<int>(fft_len));
 
         // IFFT
         cufftExecC2C(fft_plan,
@@ -588,18 +600,14 @@ Eigen::MatrixXf cuda_caf(const Eigen::VectorXcf& ref,
                      reinterpret_cast<cufftComplex*>(d_fft_prod),
                      CUFFT_INVERSE);
 
-        // Extract magnitude
-        {
-            std::vector<float> result_h(fft_len * 2);
-            cudaMemcpy(result_h.data(), d_fft_prod, fft_len * 2 * sizeof(float), cudaMemcpyDeviceToHost);
-
-            for (size_t r = 0; r < n_range_bins && r < fft_len; ++r) {
-                float re = result_h[2 * r];
-                float im = result_h[2 * r + 1];
-                caf_out(d, r) = std::sqrt(re * re + im * im);
-            }
-        }
+        // Extract magnitude directly to output row on GPU
+        int blocks_range = div_ceil(n_range_bins, BLOCK_SIZE);
+        kernel_magnitude_interleaved_f32<<<blocks_range, BLOCK_SIZE>>>(
+            d_caf_out + d * n_range_bins, d_fft_prod, static_cast<int>(n_range_bins));
     }
+
+    // Single D2H transfer at the end
+    cudaMemcpy(caf_out.data(), d_caf_out, n_doppler_bins * n_range_bins * sizeof(float), cudaMemcpyDeviceToHost);
 
     // Cleanup
     cufftDestroy(fft_plan);
@@ -612,7 +620,7 @@ Eigen::MatrixXf cuda_caf(const Eigen::VectorXcf& ref,
     cudaFree(d_fft_ref);
     cudaFree(d_fft_surv);
     cudaFree(d_fft_prod);
-    cudaFree(d_range_profile);
+    cudaFree(d_caf_out);
 
 #else
     // Fallback: compute on CPU

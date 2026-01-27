@@ -418,24 +418,12 @@ float cuda_vec_sum_f32(const float* a, size_t n) {
     }
 
     float result = 0.0f;
-    float one = 1.0f;
 
-    // Use cuBLAS to compute sum via dot product with ones vector
-    float* d_ones;
-    cudaMalloc(&d_ones, n * sizeof(float));
-
-    // Initialize ones vector
-    dim3 block(BLOCK_SIZE);
-    dim3 grid(div_ceil(n, BLOCK_SIZE));
-    // Simple kernel to set all to 1
-    kernel_vec_scale_f32<<<grid, block>>>(d_ones, d_ones, 0.0f, n);
-    cudaMemset(d_ones, 0, n * sizeof(float));
-
-    // Actually, just use a temp device variable
+    // Allocate device result
     float* d_result;
     cudaMalloc(&d_result, sizeof(float));
 
-    // CUB reduction is more efficient
+    // Use CUB reduction for efficient parallel sum
     void* d_temp_storage = nullptr;
     size_t temp_storage_bytes = 0;
     cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, a, d_result, n);
@@ -446,7 +434,6 @@ float cuda_vec_sum_f32(const float* a, size_t n) {
 
     cudaFree(d_temp_storage);
     cudaFree(d_result);
-    cudaFree(d_ones);
 
     return result;
 #else

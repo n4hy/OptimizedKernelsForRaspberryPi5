@@ -588,8 +588,8 @@ void neon_tanh_f32_fast(float* out, const float* in, std::size_t n) {
     i = 0;
     for (; i + 3 < n; i += 4) {
         float32x4_t s = vld1q_f32(sig.data() + i);
-        float32x4_t result = vmlsq_f32(vnegq_f32(vone), vtwo, s); // 2*s - 1
-        result = vmlaq_f32(vnegq_f32(vone), vtwo, s);
+        // tanh(x) = 2*sigmoid(2x) - 1 = -1 + 2*s
+        float32x4_t result = vmlaq_f32(vnegq_f32(vone), vtwo, s);
         vst1q_f32(out + i, result);
     }
     for (; i < n; ++i) {
