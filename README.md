@@ -746,6 +746,29 @@ OptMathKernels/
 
 ## Recent Changes
 
+### v0.2.2 - Cross-Platform Verification (January 2026)
+
+**Cross-Platform Testing:**
+- Verified full compatibility between AMD64 (x86_64) and ARM64 (aarch64) platforms
+- All 10 test suites pass on Raspberry Pi 5 (ARM Cortex-A76)
+- Tested with GCC 14.2.0, Eigen 3.4.0, Vulkan 1.4.309
+
+**Test Results (Raspberry Pi 5):**
+| Test Suite | Tests | Status |
+|------------|-------|--------|
+| `test_basic` | 1 | Passed |
+| `test_neon_kernels` | 4 | Passed |
+| `test_neon_complex` | 7 | Passed |
+| `test_neon_transcendentals` | 10 | Passed |
+| `test_vulkan_vector` | 1 | Passed |
+| `test_vulkan_matrix` | 1 | Passed |
+| `test_vulkan_dsp` | 1 | Passed |
+| `test_vulkan_advanced` | 1 | Passed |
+| `test_radar_caf` | 6 | Passed |
+| `test_radar_cfar` | 9 | Passed |
+
+**Total: 41 individual test cases passed**
+
 ### v0.2.1 - Performance and Bug Fixes
 
 **CUDA Backend:**
