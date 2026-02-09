@@ -91,6 +91,12 @@ project, providing hardware-accelerated kernels for:
 - **Cache-Blocked GEMM**: 8x8 microkernel with MC=128, KC=256 blocking for Cortex-A76
 - **Reductions**: Sum, max, min, dot product with horizontal NEON adds
 
+### DSP Kernels (`optmath::neon`)
+
+- **Polyphase Resampler**: Rational L/M rate conversion with NEON-optimized FIR per phase, streaming and one-shot APIs
+- **Biquad IIR Filter**: Direct Form II Transposed with cascade support, design helpers for lowpass/highpass/bandpass/notch
+- **2D Convolution**: NEON-vectorized general NxM convolution, separable kernels, unrolled 3x3 and 5x5 specializations
+
 ### GPU Acceleration (`optmath::vulkan`)
 
 - **Tiled GPU Matrix Multiply**: 16x16 shared memory tiles for efficient GPU GEMM
@@ -369,7 +375,7 @@ For complete API documentation of all **396+ functions**, see:
 
 | Backend | Functions | Description |
 |---------|-----------|-------------|
-| **NEON** | 83 | ARM SIMD operations for Raspberry Pi 5 |
+| **NEON** | 103 | ARM SIMD operations for Raspberry Pi 5 |
 | **CUDA** | 242 | NVIDIA GPU kernels (cuBLAS, cuFFT, cuSOLVER) |
 | **Vulkan** | 23 | Cross-platform GPU compute shaders |
 | **Radar** | 48 | Passive radar signal processing |
@@ -474,6 +480,99 @@ std::complex<float> dot = optmath::neon::neon_complex_dot(a, b);
 // Magnitude and phase
 Eigen::VectorXf mag = optmath::neon::neon_complex_magnitude(a);
 Eigen::VectorXf phase = optmath::neon::neon_complex_phase(a);
+```
+
+### NEON DSP: Polyphase Resampler
+
+```cpp
+#include <optmath/neon_kernels.hpp>
+using namespace optmath::neon;
+
+// Rational rate conversion by L/M (e.g., 48kHz -> 44.1kHz ≈ 147/160)
+std::size_t L = 147, M = 160;
+
+// Design a lowpass prototype filter (cutoff at min(pi/L, pi/M))
+std::vector<float> filter = /* your FIR lowpass filter */;
+
+// One-shot resampling
+std::vector<float> input(10000), output(input.size() * L / M + 100);
+std::size_t out_len = 0;
+neon_resample_oneshot_f32(output.data(), &out_len,
+                           input.data(), input.size(),
+                           filter.data(), filter.size(), L, M);
+
+// Streaming resampling (maintains state between calls)
+PolyphaseResamplerState state;
+neon_resample_init(state, filter.data(), filter.size(), L, M);
+std::size_t n = neon_resample_f32(output.data(), input.data(), input.size(), state);
+
+// Eigen wrapper
+Eigen::VectorXf in_vec = Eigen::VectorXf::Random(10000);
+Eigen::VectorXf filt_vec = Eigen::Map<Eigen::VectorXf>(filter.data(), filter.size());
+Eigen::VectorXf result = neon_resample(in_vec, filt_vec, L, M);
+```
+
+### NEON DSP: Biquad IIR Filter
+
+```cpp
+#include <optmath/neon_kernels.hpp>
+using namespace optmath::neon;
+
+// Design a lowpass filter (fc=1000Hz, fs=48000Hz, Q=0.707)
+BiquadCoeffs lp = neon_biquad_lowpass(1000.0f, 48000.0f);
+
+// Process audio samples
+std::vector<float> input(4096), output(4096);
+BiquadState state;
+neon_biquad_f32(output.data(), input.data(), input.size(), lp, state);
+
+// Cascade for higher-order filtering (4th order = 2 biquad sections)
+BiquadCoeffs cascade[2] = {
+    neon_biquad_lowpass(1000.0f, 48000.0f),
+    neon_biquad_lowpass(1000.0f, 48000.0f)
+};
+BiquadState states[2] = {};
+neon_biquad_cascade_f32(output.data(), input.data(), input.size(),
+                         cascade, states, 2);
+
+// Other filter types
+BiquadCoeffs hp = neon_biquad_highpass(500.0f, 48000.0f);
+BiquadCoeffs bp = neon_biquad_bandpass(1000.0f, 48000.0f, 5.0f);
+BiquadCoeffs notch = neon_biquad_notch(60.0f, 48000.0f, 30.0f);  // 60Hz hum removal
+```
+
+### NEON DSP: 2D Convolution
+
+```cpp
+#include <optmath/neon_kernels.hpp>
+using namespace optmath::neon;
+
+// Input image in row-major layout
+std::size_t rows = 480, cols = 640;
+std::vector<float> image(rows * cols);
+
+// 3x3 Sobel edge detection (horizontal)
+float sobel_x[9] = {-1, 0, 1, -2, 0, 2, -1, 0, 1};
+std::vector<float> edges((rows - 2) * (cols - 2));
+neon_conv2d_3x3_f32(edges.data(), image.data(), rows, cols, sobel_x);
+
+// 5x5 Gaussian blur
+float gauss5x5[25] = { /* your kernel */ };
+std::vector<float> blurred((rows - 4) * (cols - 4));
+neon_conv2d_5x5_f32(blurred.data(), image.data(), rows, cols, gauss5x5);
+
+// Separable convolution (faster for separable kernels)
+float row_k[] = {0.25f, 0.5f, 0.25f};
+float col_k[] = {0.25f, 0.5f, 0.25f};
+neon_conv2d_separable_f32(blurred.data(), image.data(), rows, cols,
+                           row_k, 3, col_k, 3);
+
+// Eigen wrapper
+Eigen::MatrixXf img = Eigen::MatrixXf::Random(64, 64);
+Eigen::MatrixXf kern(3, 3);
+kern << 1, 2, 1, 2, 4, 2, 1, 2, 1;
+kern /= 16.0f;
+Eigen::MatrixXf result = neon_conv2d(img, kern);
 ```
 
 ### Radar: Cross-Ambiguity Function (CAF)
@@ -687,7 +786,7 @@ nvidia-smi
 ```
 OptMathKernels/
 ├── include/optmath/
-│   ├── neon_kernels.hpp      # NEON API declarations (83 functions)
+│   ├── neon_kernels.hpp      # NEON API declarations (103 functions)
 │   ├── vulkan_backend.hpp    # Vulkan API declarations (23 functions)
 │   ├── cuda_backend.hpp      # CUDA API declarations (242 functions)
 │   └── radar_kernels.hpp     # Radar processing API (48 functions)
@@ -696,7 +795,10 @@ OptMathKernels/
 │   │   ├── neon_kernels.cpp        # Core NEON + transcendentals
 │   │   ├── neon_complex.cpp        # Complex number operations
 │   │   ├── neon_gemm_optimized.cpp # Cache-blocked GEMM
-│   │   └── neon_radar.cpp          # Radar signal processing
+│   │   ├── neon_radar.cpp          # Radar signal processing
+│   │   ├── neon_resample.cpp       # Polyphase resampler
+│   │   ├── neon_iir.cpp            # Biquad IIR filter
+│   │   └── neon_conv2d.cpp         # 2D convolution
 │   ├── vulkan/
 │   │   ├── vulkan_backend.cpp      # Vulkan context & dispatch
 │   │   └── shaders/                # 37 GLSL compute shaders
@@ -715,6 +817,9 @@ OptMathKernels/
 │   ├── test_neon_kernels.cpp       # NEON unit tests
 │   ├── test_neon_complex.cpp       # Complex operation tests
 │   ├── test_neon_transcendentals.cpp
+│   ├── test_neon_resample.cpp      # Polyphase resampler tests
+│   ├── test_neon_iir.cpp           # Biquad IIR filter tests
+│   ├── test_neon_conv2d.cpp        # 2D convolution tests
 │   ├── test_vulkan_vector.cpp      # Vulkan vector tests
 │   ├── test_vulkan_matrix.cpp      # Vulkan matrix tests
 │   ├── test_vulkan_dsp.cpp         # Vulkan DSP tests
@@ -745,6 +850,38 @@ OptMathKernels/
 ---
 
 ## Recent Changes
+
+### v0.3.0 - DSP Kernels: Resampler, IIR, 2D Convolution (February 2026)
+
+**New DSP Kernels:**
+
+- **Polyphase Resampler** (`neon_resample.cpp`):
+  - Rational L/M sample rate conversion using polyphase decomposition
+  - NEON-optimized FIR filtering per phase (reuses `neon_dot_f32`)
+  - Phase accumulator algorithm with delay line state management
+  - Both streaming (`neon_resample_f32`) and one-shot (`neon_resample_oneshot_f32`) APIs
+
+- **Biquad IIR Filter** (`neon_iir.cpp`):
+  - Direct Form II Transposed for optimal numerical stability
+  - Single section (`neon_biquad_f32`) and cascade (`neon_biquad_cascade_f32`)
+  - In-place processing supported (out and in may alias)
+  - Design helpers using Audio EQ Cookbook formulas: lowpass, highpass, bandpass, notch
+
+- **2D Convolution** (`neon_conv2d.cpp`):
+  - General NxM convolution with NEON vectorization over output columns (4 at a time)
+  - Separable 2D convolution: row pass reuses `neon_fir_f32`, NEON column pass
+  - Fully unrolled 3x3 kernel (9 broadcast coefficients, 9 multiply-accumulates)
+  - Unrolled 5x5 kernel specialization
+  - Row-major layout for natural image/matrix processing
+
+**New Tests:**
+| Test Suite | Tests | Status |
+|------------|-------|--------|
+| `test_neon_resample` | 7 | Passed |
+| `test_neon_iir` | 10 | Passed |
+| `test_neon_conv2d` | 9 | Passed |
+
+**Total: 67 individual test cases passed (26 new + 41 existing)**
 
 ### v0.2.2 - Cross-Platform Verification (January 2026)
 

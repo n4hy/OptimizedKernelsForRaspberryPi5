@@ -3,7 +3,7 @@
 Complete API documentation for OptMathKernels - High-Performance Numerical Library for Raspberry Pi 5 and NVIDIA GPUs.
 
 **Version**: 1.0.0
-**Total Functions**: 396+
+**Total Functions**: 416+
 **Backends**: NEON (ARM), CUDA (NVIDIA), Vulkan (Cross-platform)
 
 ---
@@ -77,6 +77,73 @@ Returns `true` if NEON acceleration was compiled in and is available.
 | Function | Return Type | Parameters | Description |
 |----------|-------------|------------|-------------|
 | `neon_fir_f32` | `void` | `const float* x, std::size_t n_x, const float* h, std::size_t n_h, float* y` | FIR filter: `y = x * h` (convolution) |
+
+---
+
+### Polyphase Resampler (Low-Level)
+
+Rational sample rate conversion by L/M using polyphase decomposition with NEON-optimized FIR per phase.
+
+**Structures:**
+```cpp
+struct PolyphaseResamplerState {
+    std::vector<std::vector<float>> phases;  // Polyphase decomposition [L][n_taps]
+    std::size_t L;              // Interpolation factor
+    std::size_t M;              // Decimation factor
+    std::size_t n_taps;         // Taps per phase
+    std::vector<float> delay;   // Delay line for streaming
+    std::size_t delay_pos;      // Write position in circular delay line
+    std::size_t phase_acc;      // Phase accumulator
+};
+```
+
+| Function | Return Type | Parameters | Description |
+|----------|-------------|------------|-------------|
+| `neon_resample_init` | `void` | `PolyphaseResamplerState& state, const float* filter, std::size_t filter_len, std::size_t L, std::size_t M` | Initialize resampler with prototype lowpass filter |
+| `neon_resample_f32` | `std::size_t` | `float* out, const float* in, std::size_t input_len, PolyphaseResamplerState& state` | Streaming resampler (returns output sample count) |
+| `neon_resample_oneshot_f32` | `void` | `float* out, std::size_t* output_len, const float* in, std::size_t input_len, const float* filter, std::size_t filter_len, std::size_t L, std::size_t M` | One-shot resampler (non-streaming) |
+
+---
+
+### Biquad IIR Filter (Low-Level)
+
+Direct Form II Transposed biquad filter with cascade support and design helpers.
+
+**Structures:**
+```cpp
+struct BiquadCoeffs {
+    float b0, b1, b2;  // Numerator (feedforward)
+    float a1, a2;       // Denominator (feedback), a0 normalized to 1
+};
+
+struct BiquadState {
+    float s1 = 0.0f;   // DF2T state variable 1
+    float s2 = 0.0f;   // DF2T state variable 2
+};
+```
+
+| Function | Return Type | Parameters | Description |
+|----------|-------------|------------|-------------|
+| `neon_biquad_f32` | `void` | `float* out, const float* in, std::size_t n, const BiquadCoeffs& coeffs, BiquadState& state` | Process single biquad section (in-place OK) |
+| `neon_biquad_cascade_f32` | `void` | `float* out, const float* in, std::size_t n, const BiquadCoeffs* coeffs, BiquadState* states, std::size_t n_sections` | Process cascade of biquad sections |
+| `neon_biquad_lowpass` | `BiquadCoeffs` | `float fc, float fs, float Q = 0.707` | Design 2nd-order Butterworth lowpass |
+| `neon_biquad_highpass` | `BiquadCoeffs` | `float fc, float fs, float Q = 0.707` | Design 2nd-order Butterworth highpass |
+| `neon_biquad_bandpass` | `BiquadCoeffs` | `float fc, float fs, float Q = 1.0` | Design 2nd-order bandpass (constant 0dB peak) |
+| `neon_biquad_notch` | `BiquadCoeffs` | `float fc, float fs, float Q = 1.0` | Design 2nd-order notch (band-reject) |
+
+---
+
+### 2D Convolution (Low-Level)
+
+NEON-vectorized 2D convolution with row-major layout. Valid mode (no padding).
+Output size: `(in_rows - kernel_rows + 1) x (in_cols - kernel_cols + 1)`.
+
+| Function | Return Type | Parameters | Description |
+|----------|-------------|------------|-------------|
+| `neon_conv2d_f32` | `void` | `float* out, const float* in, std::size_t in_rows, std::size_t in_cols, const float* kernel, std::size_t kernel_rows, std::size_t kernel_cols` | General NxM 2D convolution |
+| `neon_conv2d_separable_f32` | `void` | `float* out, const float* in, std::size_t in_rows, std::size_t in_cols, const float* row_kernel, std::size_t row_kernel_len, const float* col_kernel, std::size_t col_kernel_len` | Separable 2D convolution (row then column pass) |
+| `neon_conv2d_3x3_f32` | `void` | `float* out, const float* in, std::size_t in_rows, std::size_t in_cols, const float kernel[9]` | Optimized 3x3 convolution (fully unrolled) |
+| `neon_conv2d_5x5_f32` | `void` | `float* out, const float* in, std::size_t in_rows, std::size_t in_cols, const float kernel[25]` | Optimized 5x5 convolution (unrolled) |
 
 ---
 
@@ -183,6 +250,16 @@ High-level C++ interface using Eigen types.
 | `neon_complex_dot` | `std::complex<float>` | `const Eigen::VectorXcf& a, const Eigen::VectorXcf& b` | Complex dot product |
 | `neon_complex_magnitude` | `Eigen::VectorXf` | `const Eigen::VectorXcf& a` | Magnitude of complex vector |
 | `neon_complex_phase` | `Eigen::VectorXf` | `const Eigen::VectorXcf& a` | Phase of complex vector |
+
+---
+
+### Eigen DSP Wrappers
+
+| Function | Return Type | Parameters | Description |
+|----------|-------------|------------|-------------|
+| `neon_resample` | `Eigen::VectorXf` | `const Eigen::VectorXf& in, const Eigen::VectorXf& filter, std::size_t L, std::size_t M` | Polyphase resampler (one-shot) |
+| `neon_biquad` | `Eigen::VectorXf` | `const Eigen::VectorXf& in, const BiquadCoeffs& coeffs` | Biquad IIR filter (single section) |
+| `neon_conv2d` | `Eigen::MatrixXf` | `const Eigen::MatrixXf& in, const Eigen::MatrixXf& kernel` | 2D convolution (handles col/row-major conversion) |
 
 ---
 

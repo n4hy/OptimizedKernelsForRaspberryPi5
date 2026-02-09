@@ -50,6 +50,122 @@ namespace neon {
     void neon_fir_f32(const float* x, std::size_t n_x, const float* h, std::size_t n_h, float* y);
 
     // =========================================================================
+    // Polyphase Resampler
+    // =========================================================================
+
+    struct PolyphaseResamplerState {
+        std::vector<std::vector<float>> phases;  // Polyphase decomposition [L][n_taps]
+        std::size_t L;              // Interpolation factor
+        std::size_t M;              // Decimation factor
+        std::size_t n_taps;         // Taps per phase
+        std::vector<float> delay;   // Delay line for streaming
+        std::size_t delay_pos;      // Write position in circular delay line
+        std::size_t phase_acc;      // Phase accumulator
+    };
+
+    /**
+     * @brief Initialize polyphase resampler state.
+     * Decomposes prototype filter into L polyphase phases.
+     * Filter should be a lowpass with cutoff at min(pi/L, pi/M).
+     * Scale filter by L to preserve unity gain after interpolation.
+     */
+    void neon_resample_init(PolyphaseResamplerState& state,
+                            const float* filter, std::size_t filter_len,
+                            std::size_t L, std::size_t M);
+
+    /**
+     * @brief Process a block through the polyphase resampler (streaming).
+     * Returns the number of output samples produced.
+     * Caller must allocate out with at least ceil(input_len * L / M) + n_taps floats.
+     */
+    std::size_t neon_resample_f32(float* out, const float* in, std::size_t input_len,
+                                   PolyphaseResamplerState& state);
+
+    /**
+     * @brief One-shot polyphase resampler (non-streaming, zero-padded edges).
+     * Output length is written to *output_len.
+     * Caller must allocate out with at least ceil(input_len * L / M) + 1 floats.
+     */
+    void neon_resample_oneshot_f32(float* out, std::size_t* output_len,
+                                    const float* in, std::size_t input_len,
+                                    const float* filter, std::size_t filter_len,
+                                    std::size_t L, std::size_t M);
+
+    // =========================================================================
+    // Biquad IIR Filter (Direct Form II Transposed)
+    // =========================================================================
+
+    struct BiquadCoeffs {
+        float b0, b1, b2;  // Numerator (feedforward)
+        float a1, a2;       // Denominator (feedback), a0 normalized to 1
+    };
+
+    struct BiquadState {
+        float s1 = 0.0f;   // DF2T state variable 1
+        float s2 = 0.0f;   // DF2T state variable 2
+    };
+
+    /**
+     * @brief Process samples through a single biquad section (DF2T).
+     * out and in may alias (in-place processing supported).
+     */
+    void neon_biquad_f32(float* out, const float* in, std::size_t n,
+                         const BiquadCoeffs& coeffs, BiquadState& state);
+
+    /**
+     * @brief Process samples through a cascade of biquad sections.
+     * Each section is applied sequentially. out and in may alias.
+     */
+    void neon_biquad_cascade_f32(float* out, const float* in, std::size_t n,
+                                  const BiquadCoeffs* coeffs, BiquadState* states,
+                                  std::size_t n_sections);
+
+    // Biquad design helpers (Audio EQ Cookbook formulas)
+    BiquadCoeffs neon_biquad_lowpass(float fc, float fs, float Q = 0.7071067811865476f);
+    BiquadCoeffs neon_biquad_highpass(float fc, float fs, float Q = 0.7071067811865476f);
+    BiquadCoeffs neon_biquad_bandpass(float fc, float fs, float Q = 1.0f);
+    BiquadCoeffs neon_biquad_notch(float fc, float fs, float Q = 1.0f);
+
+    // =========================================================================
+    // 2D Convolution (row-major layout)
+    // =========================================================================
+
+    /**
+     * @brief General 2D convolution (valid mode, no padding).
+     * Input and kernel in row-major order.
+     * Output size: (in_rows - kernel_rows + 1) x (in_cols - kernel_cols + 1).
+     */
+    void neon_conv2d_f32(float* out, const float* in,
+                         std::size_t in_rows, std::size_t in_cols,
+                         const float* kernel, std::size_t kernel_rows, std::size_t kernel_cols);
+
+    /**
+     * @brief Separable 2D convolution (valid mode).
+     * Applies row_kernel along columns first, then col_kernel along rows.
+     * Output size: (in_rows - col_len + 1) x (in_cols - row_len + 1).
+     */
+    void neon_conv2d_separable_f32(float* out, const float* in,
+                                    std::size_t in_rows, std::size_t in_cols,
+                                    const float* row_kernel, std::size_t row_kernel_len,
+                                    const float* col_kernel, std::size_t col_kernel_len);
+
+    /**
+     * @brief Optimized 3x3 convolution with fully unrolled kernel.
+     * Output size: (in_rows - 2) x (in_cols - 2).
+     */
+    void neon_conv2d_3x3_f32(float* out, const float* in,
+                              std::size_t in_rows, std::size_t in_cols,
+                              const float kernel[9]);
+
+    /**
+     * @brief Optimized 5x5 convolution with unrolled kernel.
+     * Output size: (in_rows - 4) x (in_cols - 4).
+     */
+    void neon_conv2d_5x5_f32(float* out, const float* in,
+                              std::size_t in_rows, std::size_t in_cols,
+                              const float kernel[25]);
+
+    // =========================================================================
     // Activation Functions
     // =========================================================================
 
@@ -179,6 +295,18 @@ namespace neon {
     std::complex<float> neon_complex_dot(const Eigen::VectorXcf& a, const Eigen::VectorXcf& b);
     Eigen::VectorXf neon_complex_magnitude(const Eigen::VectorXcf& a);
     Eigen::VectorXf neon_complex_phase(const Eigen::VectorXcf& a);
+
+    // Eigen wrappers for resampler
+    Eigen::VectorXf neon_resample(const Eigen::VectorXf& in,
+                                   const Eigen::VectorXf& filter,
+                                   std::size_t L, std::size_t M);
+
+    // Eigen wrappers for biquad
+    Eigen::VectorXf neon_biquad(const Eigen::VectorXf& in,
+                                 const BiquadCoeffs& coeffs);
+
+    // Eigen wrappers for 2D convolution
+    Eigen::MatrixXf neon_conv2d(const Eigen::MatrixXf& in, const Eigen::MatrixXf& kernel);
 
 }
 }

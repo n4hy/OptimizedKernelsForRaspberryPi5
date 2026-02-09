@@ -48,6 +48,18 @@ add_executable(test_radar_cfar test_radar_cfar.cpp)
 target_link_libraries(test_radar_cfar PRIVATE OptMathKernels::OptMathKernels gtest gtest_main)
 add_test(NAME test_radar_cfar COMMAND test_radar_cfar)
 
+add_executable(test_neon_resample test_neon_resample.cpp)
+target_link_libraries(test_neon_resample PRIVATE OptMathKernels::OptMathKernels gtest gtest_main)
+add_test(NAME test_neon_resample COMMAND test_neon_resample)
+
+add_executable(test_neon_iir test_neon_iir.cpp)
+target_link_libraries(test_neon_iir PRIVATE OptMathKernels::OptMathKernels gtest gtest_main)
+add_test(NAME test_neon_iir COMMAND test_neon_iir)
+
+add_executable(test_neon_conv2d test_neon_conv2d.cpp)
+target_link_libraries(test_neon_conv2d PRIVATE OptMathKernels::OptMathKernels gtest gtest_main)
+add_test(NAME test_neon_conv2d COMMAND test_neon_conv2d)
+
 # CUDA tests (only if CUDA is enabled)
 if(ENABLE_CUDA)
     add_executable(test_cuda_kernels test_cuda_kernels.cpp)

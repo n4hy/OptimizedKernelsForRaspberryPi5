@@ -4,6 +4,9 @@ set(SOURCES
     neon/neon_complex.cpp
     neon/neon_gemm_optimized.cpp
     neon/neon_radar.cpp
+    neon/neon_resample.cpp
+    neon/neon_iir.cpp
+    neon/neon_conv2d.cpp
     vulkan/vulkan_backend.cpp
 )
 
