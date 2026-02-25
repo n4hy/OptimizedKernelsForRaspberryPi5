@@ -152,20 +152,12 @@ __global__ void kernel_complex_add_f32(float* __restrict__ out_re,
     }
 }
 
-// Complex dot product reduction (using warp shuffle)
-__device__ void warp_reduce_complex(volatile float* sdata_re, volatile float* sdata_im, int tid) {
-    sdata_re[tid] += sdata_re[tid + 32];
-    sdata_im[tid] += sdata_im[tid + 32];
-    sdata_re[tid] += sdata_re[tid + 16];
-    sdata_im[tid] += sdata_im[tid + 16];
-    sdata_re[tid] += sdata_re[tid + 8];
-    sdata_im[tid] += sdata_im[tid + 8];
-    sdata_re[tid] += sdata_re[tid + 4];
-    sdata_im[tid] += sdata_im[tid + 4];
-    sdata_re[tid] += sdata_re[tid + 2];
-    sdata_im[tid] += sdata_im[tid + 2];
-    sdata_re[tid] += sdata_re[tid + 1];
-    sdata_im[tid] += sdata_im[tid + 1];
+// Complex dot product reduction using modern warp shuffle intrinsics
+__device__ void warp_reduce_complex(float& val_re, float& val_im) {
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        val_re += __shfl_down_sync(0xFFFFFFFF, val_re, offset);
+        val_im += __shfl_down_sync(0xFFFFFFFF, val_im, offset);
+    }
 }
 
 __global__ void kernel_complex_dot_reduce_f32(float* __restrict__ out_re,
@@ -227,13 +219,20 @@ __global__ void kernel_complex_dot_reduce_f32(float* __restrict__ out_re,
         __syncthreads();
     }
 
+    // Final warp reduction using shuffle intrinsics
+    float final_re = (tid < 32) ? sdata_re[tid] : 0.0f;
+    float final_im = (tid < 32) ? sdata_im[tid] : 0.0f;
+
     if (tid < 32) {
-        warp_reduce_complex(sdata_re, sdata_im, tid);
+        // Add the second half of the warp's data
+        final_re += sdata_re[tid + 32];
+        final_im += sdata_im[tid + 32];
+        warp_reduce_complex(final_re, final_im);
     }
 
     if (tid == 0) {
-        atomicAdd(out_re, sdata_re[0]);
-        atomicAdd(out_im, sdata_im[0]);
+        atomicAdd(out_re, final_re);
+        atomicAdd(out_im, final_im);
     }
 }
 
@@ -361,6 +360,7 @@ void cuda_complex_mul_f32(float* out_re, float* out_im,
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_complex_mul_f32<<<blocks, BLOCK_SIZE>>>(out_re, out_im,
                                                     a_re, a_im, b_re, b_im, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -371,6 +371,7 @@ void cuda_complex_conj_mul_f32(float* out_re, float* out_im,
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_complex_conj_mul_f32<<<blocks, BLOCK_SIZE>>>(out_re, out_im,
                                                          a_re, a_im, b_re, b_im, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -396,6 +397,7 @@ void cuda_complex_magnitude_f32(float* out, const float* re, const float* im, si
 #ifdef OPTMATH_USE_CUDA
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_complex_magnitude_f32<<<blocks, BLOCK_SIZE>>>(out, re, im, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -403,6 +405,7 @@ void cuda_complex_phase_f32(float* out, const float* re, const float* im, size_t
 #ifdef OPTMATH_USE_CUDA
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_complex_phase_f32<<<blocks, BLOCK_SIZE>>>(out, re, im, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -410,6 +413,7 @@ void cuda_complex_exp_f32(float* out_re, float* out_im, const float* phase, size
 #ifdef OPTMATH_USE_CUDA
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_complex_exp_f32<<<blocks, BLOCK_SIZE>>>(out_re, out_im, phase, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 

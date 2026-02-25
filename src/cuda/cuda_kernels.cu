@@ -636,24 +636,38 @@ Eigen::VectorXf cuda_vec_mul(const Eigen::VectorXf& a, const Eigen::VectorXf& b)
     }
 
     size_t n = a.size();
-    float* d_a;
-    float* d_b;
-    float* d_out;
+    float* d_a = nullptr;
+    float* d_b = nullptr;
+    float* d_out = nullptr;
+    cudaError_t err;
 
-    cudaMalloc(&d_a, n * sizeof(float));
-    cudaMalloc(&d_b, n * sizeof(float));
-    cudaMalloc(&d_out, n * sizeof(float));
+    auto cleanup = [&]() {
+        if (d_a) cudaFree(d_a);
+        if (d_b) cudaFree(d_b);
+        if (d_out) cudaFree(d_out);
+    };
 
-    cudaMemcpy(d_a, a.data(), n * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b, b.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    err = cudaMalloc(&d_a, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); result = a.array() * b.array(); return result; }
+
+    err = cudaMalloc(&d_b, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); result = a.array() * b.array(); return result; }
+
+    err = cudaMalloc(&d_out, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); result = a.array() * b.array(); return result; }
+
+    err = cudaMemcpy(d_a, a.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); result = a.array() * b.array(); return result; }
+
+    err = cudaMemcpy(d_b, b.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); result = a.array() * b.array(); return result; }
 
     cuda_vec_mul_f32(d_out, d_a, d_b, n);
 
-    cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { cleanup(); result = a.array() * b.array(); return result; }
 
-    cudaFree(d_a);
-    cudaFree(d_b);
-    cudaFree(d_out);
+    cleanup();
 #else
     result = a.array() * b.array();
 #endif
@@ -670,20 +684,30 @@ Eigen::VectorXf cuda_vec_scale(const Eigen::VectorXf& a, float scalar) {
     }
 
     size_t n = a.size();
-    float* d_a;
-    float* d_out;
+    float* d_a = nullptr;
+    float* d_out = nullptr;
+    cudaError_t err;
 
-    cudaMalloc(&d_a, n * sizeof(float));
-    cudaMalloc(&d_out, n * sizeof(float));
+    auto cleanup = [&]() {
+        if (d_a) cudaFree(d_a);
+        if (d_out) cudaFree(d_out);
+    };
 
-    cudaMemcpy(d_a, a.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    err = cudaMalloc(&d_a, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); result = a * scalar; return result; }
+
+    err = cudaMalloc(&d_out, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); result = a * scalar; return result; }
+
+    err = cudaMemcpy(d_a, a.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); result = a * scalar; return result; }
 
     cuda_vec_scale_f32(d_out, d_a, scalar, n);
 
-    cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { cleanup(); result = a * scalar; return result; }
 
-    cudaFree(d_a);
-    cudaFree(d_out);
+    cleanup();
 #else
     result = a * scalar;
 #endif
@@ -698,19 +722,30 @@ float cuda_vec_dot(const Eigen::VectorXf& a, const Eigen::VectorXf& b) {
     }
 
     size_t n = a.size();
-    float* d_a;
-    float* d_b;
+    float* d_a = nullptr;
+    float* d_b = nullptr;
+    cudaError_t err;
 
-    cudaMalloc(&d_a, n * sizeof(float));
-    cudaMalloc(&d_b, n * sizeof(float));
+    auto cleanup = [&]() {
+        if (d_a) cudaFree(d_a);
+        if (d_b) cudaFree(d_b);
+    };
 
-    cudaMemcpy(d_a, a.data(), n * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b, b.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    err = cudaMalloc(&d_a, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); return a.dot(b); }
+
+    err = cudaMalloc(&d_b, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); return a.dot(b); }
+
+    err = cudaMemcpy(d_a, a.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); return a.dot(b); }
+
+    err = cudaMemcpy(d_b, b.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); return a.dot(b); }
 
     float result = cuda_vec_dot_f32(d_a, d_b, n);
 
-    cudaFree(d_a);
-    cudaFree(d_b);
+    cleanup();
 
     return result;
 #else
@@ -725,9 +760,14 @@ float cuda_reduce_sum(const Eigen::VectorXf& a) {
     }
 
     size_t n = a.size();
-    float* d_a;
-    cudaMalloc(&d_a, n * sizeof(float));
-    cudaMemcpy(d_a, a.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    float* d_a = nullptr;
+    cudaError_t err;
+
+    err = cudaMalloc(&d_a, n * sizeof(float));
+    if (err != cudaSuccess) { return a.sum(); }
+
+    err = cudaMemcpy(d_a, a.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cudaFree(d_a); return a.sum(); }
 
     float result = cuda_vec_sum_f32(d_a, n);
 
@@ -745,9 +785,14 @@ float cuda_reduce_max(const Eigen::VectorXf& a) {
     }
 
     size_t n = a.size();
-    float* d_a;
-    cudaMalloc(&d_a, n * sizeof(float));
-    cudaMemcpy(d_a, a.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    float* d_a = nullptr;
+    cudaError_t err;
+
+    err = cudaMalloc(&d_a, n * sizeof(float));
+    if (err != cudaSuccess) { return a.maxCoeff(); }
+
+    err = cudaMemcpy(d_a, a.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cudaFree(d_a); return a.maxCoeff(); }
 
     float result = cuda_vec_max_f32(d_a, n);
 
@@ -765,9 +810,14 @@ float cuda_reduce_min(const Eigen::VectorXf& a) {
     }
 
     size_t n = a.size();
-    float* d_a;
-    cudaMalloc(&d_a, n * sizeof(float));
-    cudaMemcpy(d_a, a.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    float* d_a = nullptr;
+    cudaError_t err;
+
+    err = cudaMalloc(&d_a, n * sizeof(float));
+    if (err != cudaSuccess) { return a.minCoeff(); }
+
+    err = cudaMemcpy(d_a, a.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cudaFree(d_a); return a.minCoeff(); }
 
     float result = cuda_vec_min_f32(d_a, n);
 
@@ -785,9 +835,14 @@ float cuda_vec_norm(const Eigen::VectorXf& a) {
     }
 
     size_t n = a.size();
-    float* d_a;
-    cudaMalloc(&d_a, n * sizeof(float));
-    cudaMemcpy(d_a, a.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    float* d_a = nullptr;
+    cudaError_t err;
+
+    err = cudaMalloc(&d_a, n * sizeof(float));
+    if (err != cudaSuccess) { return a.norm(); }
+
+    err = cudaMemcpy(d_a, a.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cudaFree(d_a); return a.norm(); }
 
     float result = cuda_vec_norm_f32(d_a, n);
 
@@ -806,6 +861,7 @@ void cuda_exp_f32(float* out, const float* in, size_t n) {
 #ifdef OPTMATH_USE_CUDA
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_exp_f32<<<blocks, BLOCK_SIZE>>>(out, in, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -813,6 +869,7 @@ void cuda_log_f32(float* out, const float* in, size_t n) {
 #ifdef OPTMATH_USE_CUDA
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_log_f32<<<blocks, BLOCK_SIZE>>>(out, in, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -820,6 +877,7 @@ void cuda_sin_f32(float* out, const float* in, size_t n) {
 #ifdef OPTMATH_USE_CUDA
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_sin_f32<<<blocks, BLOCK_SIZE>>>(out, in, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -827,6 +885,7 @@ void cuda_cos_f32(float* out, const float* in, size_t n) {
 #ifdef OPTMATH_USE_CUDA
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_cos_f32<<<blocks, BLOCK_SIZE>>>(out, in, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -834,6 +893,7 @@ void cuda_sincos_f32(float* sin_out, float* cos_out, const float* in, size_t n) 
 #ifdef OPTMATH_USE_CUDA
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_sincos_f32<<<blocks, BLOCK_SIZE>>>(sin_out, cos_out, in, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -841,6 +901,7 @@ void cuda_tan_f32(float* out, const float* in, size_t n) {
 #ifdef OPTMATH_USE_CUDA
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_tan_f32<<<blocks, BLOCK_SIZE>>>(out, in, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -848,6 +909,7 @@ void cuda_atan2_f32(float* out, const float* y, const float* x, size_t n) {
 #ifdef OPTMATH_USE_CUDA
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_atan2_f32<<<blocks, BLOCK_SIZE>>>(out, y, x, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -855,6 +917,7 @@ void cuda_pow_f32(float* out, const float* base, const float* exp, size_t n) {
 #ifdef OPTMATH_USE_CUDA
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_pow_f32<<<blocks, BLOCK_SIZE>>>(out, base, exp, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -862,6 +925,7 @@ void cuda_sigmoid_f32(float* out, const float* in, size_t n) {
 #ifdef OPTMATH_USE_CUDA
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_sigmoid_f32<<<blocks, BLOCK_SIZE>>>(out, in, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -869,6 +933,7 @@ void cuda_tanh_f32(float* out, const float* in, size_t n) {
 #ifdef OPTMATH_USE_CUDA
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_tanh_f32<<<blocks, BLOCK_SIZE>>>(out, in, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -876,6 +941,7 @@ void cuda_relu_f32(float* out, const float* in, size_t n) {
 #ifdef OPTMATH_USE_CUDA
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_relu_f32<<<blocks, BLOCK_SIZE>>>(out, in, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -883,6 +949,7 @@ void cuda_leaky_relu_f32(float* out, const float* in, float alpha, size_t n) {
 #ifdef OPTMATH_USE_CUDA
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_leaky_relu_f32<<<blocks, BLOCK_SIZE>>>(out, in, alpha, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -890,6 +957,7 @@ void cuda_gelu_f32(float* out, const float* in, size_t n) {
 #ifdef OPTMATH_USE_CUDA
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_gelu_f32<<<blocks, BLOCK_SIZE>>>(out, in, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -898,6 +966,7 @@ void cuda_softmax_f32(float* out, const float* in, size_t n) {
     // Note: This is a simplified single-block softmax
     // For production, use a more sophisticated multi-block approach
     kernel_softmax_f32<<<1, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(out, in, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -908,16 +977,29 @@ Eigen::VectorXf cuda_exp(const Eigen::VectorXf& x) {
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
     size_t n = x.size();
-    float *d_in, *d_out;
-    cudaMalloc(&d_in, n * sizeof(float));
-    cudaMalloc(&d_out, n * sizeof(float));
-    cudaMemcpy(d_in, x.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    float *d_in = nullptr, *d_out = nullptr;
+    cudaError_t err;
+
+    auto cleanup = [&]() {
+        if (d_in) cudaFree(d_in);
+        if (d_out) cudaFree(d_out);
+    };
+
+    err = cudaMalloc(&d_in, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); result = x.array().exp(); return result; }
+
+    err = cudaMalloc(&d_out, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); result = x.array().exp(); return result; }
+
+    err = cudaMemcpy(d_in, x.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); result = x.array().exp(); return result; }
 
     cuda_exp_f32(d_out, d_in, n);
 
-    cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaFree(d_in);
-    cudaFree(d_out);
+    err = cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { cleanup(); result = x.array().exp(); return result; }
+
+    cleanup();
 #else
     result = x.array().exp();
 #endif
@@ -930,16 +1012,29 @@ Eigen::VectorXf cuda_log(const Eigen::VectorXf& x) {
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
     size_t n = x.size();
-    float *d_in, *d_out;
-    cudaMalloc(&d_in, n * sizeof(float));
-    cudaMalloc(&d_out, n * sizeof(float));
-    cudaMemcpy(d_in, x.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    float *d_in = nullptr, *d_out = nullptr;
+    cudaError_t err;
+
+    auto cleanup = [&]() {
+        if (d_in) cudaFree(d_in);
+        if (d_out) cudaFree(d_out);
+    };
+
+    err = cudaMalloc(&d_in, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); result = x.array().log(); return result; }
+
+    err = cudaMalloc(&d_out, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); result = x.array().log(); return result; }
+
+    err = cudaMemcpy(d_in, x.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); result = x.array().log(); return result; }
 
     cuda_log_f32(d_out, d_in, n);
 
-    cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaFree(d_in);
-    cudaFree(d_out);
+    err = cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { cleanup(); result = x.array().log(); return result; }
+
+    cleanup();
 #else
     result = x.array().log();
 #endif
@@ -952,16 +1047,29 @@ Eigen::VectorXf cuda_sin(const Eigen::VectorXf& x) {
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
     size_t n = x.size();
-    float *d_in, *d_out;
-    cudaMalloc(&d_in, n * sizeof(float));
-    cudaMalloc(&d_out, n * sizeof(float));
-    cudaMemcpy(d_in, x.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    float *d_in = nullptr, *d_out = nullptr;
+    cudaError_t err;
+
+    auto cleanup = [&]() {
+        if (d_in) cudaFree(d_in);
+        if (d_out) cudaFree(d_out);
+    };
+
+    err = cudaMalloc(&d_in, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); result = x.array().sin(); return result; }
+
+    err = cudaMalloc(&d_out, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); result = x.array().sin(); return result; }
+
+    err = cudaMemcpy(d_in, x.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); result = x.array().sin(); return result; }
 
     cuda_sin_f32(d_out, d_in, n);
 
-    cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaFree(d_in);
-    cudaFree(d_out);
+    err = cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { cleanup(); result = x.array().sin(); return result; }
+
+    cleanup();
 #else
     result = x.array().sin();
 #endif
@@ -974,16 +1082,29 @@ Eigen::VectorXf cuda_cos(const Eigen::VectorXf& x) {
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
     size_t n = x.size();
-    float *d_in, *d_out;
-    cudaMalloc(&d_in, n * sizeof(float));
-    cudaMalloc(&d_out, n * sizeof(float));
-    cudaMemcpy(d_in, x.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    float *d_in = nullptr, *d_out = nullptr;
+    cudaError_t err;
+
+    auto cleanup = [&]() {
+        if (d_in) cudaFree(d_in);
+        if (d_out) cudaFree(d_out);
+    };
+
+    err = cudaMalloc(&d_in, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); result = x.array().cos(); return result; }
+
+    err = cudaMalloc(&d_out, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); result = x.array().cos(); return result; }
+
+    err = cudaMemcpy(d_in, x.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); result = x.array().cos(); return result; }
 
     cuda_cos_f32(d_out, d_in, n);
 
-    cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaFree(d_in);
-    cudaFree(d_out);
+    err = cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { cleanup(); result = x.array().cos(); return result; }
+
+    cleanup();
 #else
     result = x.array().cos();
 #endif
@@ -996,16 +1117,33 @@ Eigen::VectorXf cuda_sigmoid(const Eigen::VectorXf& x) {
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
     size_t n = x.size();
-    float *d_in, *d_out;
-    cudaMalloc(&d_in, n * sizeof(float));
-    cudaMalloc(&d_out, n * sizeof(float));
-    cudaMemcpy(d_in, x.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    float *d_in = nullptr, *d_out = nullptr;
+    cudaError_t err;
+
+    auto cleanup = [&]() {
+        if (d_in) cudaFree(d_in);
+        if (d_out) cudaFree(d_out);
+    };
+
+    auto cpu_fallback = [&]() {
+        result = 1.0f / (1.0f + (-x.array()).exp());
+    };
+
+    err = cudaMalloc(&d_in, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); cpu_fallback(); return result; }
+
+    err = cudaMalloc(&d_out, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); cpu_fallback(); return result; }
+
+    err = cudaMemcpy(d_in, x.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); cpu_fallback(); return result; }
 
     cuda_sigmoid_f32(d_out, d_in, n);
 
-    cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaFree(d_in);
-    cudaFree(d_out);
+    err = cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { cleanup(); cpu_fallback(); return result; }
+
+    cleanup();
 #else
     result = 1.0f / (1.0f + (-x.array()).exp());
 #endif
@@ -1018,16 +1156,29 @@ Eigen::VectorXf cuda_tanh(const Eigen::VectorXf& x) {
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
     size_t n = x.size();
-    float *d_in, *d_out;
-    cudaMalloc(&d_in, n * sizeof(float));
-    cudaMalloc(&d_out, n * sizeof(float));
-    cudaMemcpy(d_in, x.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    float *d_in = nullptr, *d_out = nullptr;
+    cudaError_t err;
+
+    auto cleanup = [&]() {
+        if (d_in) cudaFree(d_in);
+        if (d_out) cudaFree(d_out);
+    };
+
+    err = cudaMalloc(&d_in, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); result = x.array().tanh(); return result; }
+
+    err = cudaMalloc(&d_out, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); result = x.array().tanh(); return result; }
+
+    err = cudaMemcpy(d_in, x.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); result = x.array().tanh(); return result; }
 
     cuda_tanh_f32(d_out, d_in, n);
 
-    cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaFree(d_in);
-    cudaFree(d_out);
+    err = cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { cleanup(); result = x.array().tanh(); return result; }
+
+    cleanup();
 #else
     result = x.array().tanh();
 #endif
@@ -1040,16 +1191,29 @@ Eigen::VectorXf cuda_relu(const Eigen::VectorXf& x) {
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
     size_t n = x.size();
-    float *d_in, *d_out;
-    cudaMalloc(&d_in, n * sizeof(float));
-    cudaMalloc(&d_out, n * sizeof(float));
-    cudaMemcpy(d_in, x.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    float *d_in = nullptr, *d_out = nullptr;
+    cudaError_t err;
+
+    auto cleanup = [&]() {
+        if (d_in) cudaFree(d_in);
+        if (d_out) cudaFree(d_out);
+    };
+
+    err = cudaMalloc(&d_in, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); result = x.array().max(0.0f); return result; }
+
+    err = cudaMalloc(&d_out, n * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); result = x.array().max(0.0f); return result; }
+
+    err = cudaMemcpy(d_in, x.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); result = x.array().max(0.0f); return result; }
 
     cuda_relu_f32(d_out, d_in, n);
 
-    cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaFree(d_in);
-    cudaFree(d_out);
+    err = cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { cleanup(); result = x.array().max(0.0f); return result; }
+
+    cleanup();
 #else
     result = x.array().max(0.0f);
 #endif
@@ -1199,22 +1363,37 @@ Eigen::MatrixXf cuda_mat_add(const Eigen::MatrixXf& A, const Eigen::MatrixXf& B)
 #ifdef OPTMATH_USE_CUDA
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
-    float *d_A, *d_B, *d_C;
+    float *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
     size_t size = M * N * sizeof(float);
-    cudaMalloc(&d_A, size);
-    cudaMalloc(&d_B, size);
-    cudaMalloc(&d_C, size);
+    cudaError_t err;
 
-    cudaMemcpy(d_A, A.data(), size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_B, B.data(), size, cudaMemcpyHostToDevice);
+    auto cleanup = [&]() {
+        if (d_A) cudaFree(d_A);
+        if (d_B) cudaFree(d_B);
+        if (d_C) cudaFree(d_C);
+    };
+
+    err = cudaMalloc(&d_A, size);
+    if (err != cudaSuccess) { cleanup(); C = A + B; return C; }
+
+    err = cudaMalloc(&d_B, size);
+    if (err != cudaSuccess) { cleanup(); C = A + B; return C; }
+
+    err = cudaMalloc(&d_C, size);
+    if (err != cudaSuccess) { cleanup(); C = A + B; return C; }
+
+    err = cudaMemcpy(d_A, A.data(), size, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); C = A + B; return C; }
+
+    err = cudaMemcpy(d_B, B.data(), size, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); C = A + B; return C; }
 
     cuda_mat_add_f32(d_C, d_A, d_B, M, N);
 
-    cudaMemcpy(C.data(), d_C, size, cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(C.data(), d_C, size, cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { cleanup(); C = A + B; return C; }
 
-    cudaFree(d_A);
-    cudaFree(d_B);
-    cudaFree(d_C);
+    cleanup();
 #else
     C = A + B;
 #endif
@@ -1230,19 +1409,30 @@ Eigen::MatrixXf cuda_mat_scale(const Eigen::MatrixXf& A, float scalar) {
 #ifdef OPTMATH_USE_CUDA
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
-    float *d_A, *d_C;
+    float *d_A = nullptr, *d_C = nullptr;
     size_t size = M * N * sizeof(float);
-    cudaMalloc(&d_A, size);
-    cudaMalloc(&d_C, size);
+    cudaError_t err;
 
-    cudaMemcpy(d_A, A.data(), size, cudaMemcpyHostToDevice);
+    auto cleanup = [&]() {
+        if (d_A) cudaFree(d_A);
+        if (d_C) cudaFree(d_C);
+    };
+
+    err = cudaMalloc(&d_A, size);
+    if (err != cudaSuccess) { cleanup(); C = A * scalar; return C; }
+
+    err = cudaMalloc(&d_C, size);
+    if (err != cudaSuccess) { cleanup(); C = A * scalar; return C; }
+
+    err = cudaMemcpy(d_A, A.data(), size, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); C = A * scalar; return C; }
 
     cuda_mat_scale_f32(d_C, d_A, scalar, M, N);
 
-    cudaMemcpy(C.data(), d_C, size, cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(C.data(), d_C, size, cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { cleanup(); C = A * scalar; return C; }
 
-    cudaFree(d_A);
-    cudaFree(d_C);
+    cleanup();
 #else
     C = A * scalar;
 #endif
@@ -1258,18 +1448,30 @@ Eigen::MatrixXf cuda_mat_transpose(const Eigen::MatrixXf& A) {
 #ifdef OPTMATH_USE_CUDA
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
-    float *d_A, *d_C;
-    cudaMalloc(&d_A, M * N * sizeof(float));
-    cudaMalloc(&d_C, M * N * sizeof(float));
+    float *d_A = nullptr, *d_C = nullptr;
+    size_t size = M * N * sizeof(float);
+    cudaError_t err;
 
-    cudaMemcpy(d_A, A.data(), M * N * sizeof(float), cudaMemcpyHostToDevice);
+    auto cleanup = [&]() {
+        if (d_A) cudaFree(d_A);
+        if (d_C) cudaFree(d_C);
+    };
+
+    err = cudaMalloc(&d_A, size);
+    if (err != cudaSuccess) { cleanup(); C = A.transpose(); return C; }
+
+    err = cudaMalloc(&d_C, size);
+    if (err != cudaSuccess) { cleanup(); C = A.transpose(); return C; }
+
+    err = cudaMemcpy(d_A, A.data(), size, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); C = A.transpose(); return C; }
 
     cuda_mat_transpose_f32(d_C, d_A, M, N);
 
-    cudaMemcpy(C.data(), d_C, M * N * sizeof(float), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(C.data(), d_C, size, cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { cleanup(); C = A.transpose(); return C; }
 
-    cudaFree(d_A);
-    cudaFree(d_C);
+    cleanup();
 #else
     C = A.transpose();
 #endif
@@ -1285,21 +1487,36 @@ Eigen::VectorXf cuda_mat_vec_mul(const Eigen::MatrixXf& A, const Eigen::VectorXf
 #ifdef OPTMATH_USE_CUDA
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
-    float *d_A, *d_x, *d_y;
-    cudaMalloc(&d_A, M * N * sizeof(float));
-    cudaMalloc(&d_x, N * sizeof(float));
-    cudaMalloc(&d_y, M * sizeof(float));
+    float *d_A = nullptr, *d_x = nullptr, *d_y = nullptr;
+    cudaError_t err;
 
-    cudaMemcpy(d_A, A.data(), M * N * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_x, x.data(), N * sizeof(float), cudaMemcpyHostToDevice);
+    auto cleanup = [&]() {
+        if (d_A) cudaFree(d_A);
+        if (d_x) cudaFree(d_x);
+        if (d_y) cudaFree(d_y);
+    };
+
+    err = cudaMalloc(&d_A, M * N * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); y = A * x; return y; }
+
+    err = cudaMalloc(&d_x, N * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); y = A * x; return y; }
+
+    err = cudaMalloc(&d_y, M * sizeof(float));
+    if (err != cudaSuccess) { cleanup(); y = A * x; return y; }
+
+    err = cudaMemcpy(d_A, A.data(), M * N * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); y = A * x; return y; }
+
+    err = cudaMemcpy(d_x, x.data(), N * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { cleanup(); y = A * x; return y; }
 
     cuda_mat_vec_mul_f32(d_y, d_A, d_x, M, N);
 
-    cudaMemcpy(y.data(), d_y, M * sizeof(float), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(y.data(), d_y, M * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { cleanup(); y = A * x; return y; }
 
-    cudaFree(d_A);
-    cudaFree(d_x);
-    cudaFree(d_y);
+    cleanup();
 #else
     y = A * x;
 #endif

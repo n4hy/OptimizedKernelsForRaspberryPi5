@@ -411,7 +411,14 @@ void DeviceBuffer<T>::allocate(size_t count) {
 #ifdef OPTMATH_USE_CUDA
     free();
     if (count > 0) {
-        cudaMalloc(&m_data, count * sizeof(T));
+        cudaError_t err = cudaMalloc(&m_data, count * sizeof(T));
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA error in DeviceBuffer::allocate: "
+                      << cudaGetErrorString(err) << std::endl;
+            m_data = nullptr;
+            m_size = 0;
+            return;
+        }
         m_size = count;
     }
 #endif
@@ -432,7 +439,11 @@ template<typename T>
 void DeviceBuffer<T>::copy_from_host(const T* host_data, size_t count) {
 #ifdef OPTMATH_USE_CUDA
     if (m_data && count <= m_size) {
-        cudaMemcpy(m_data, host_data, count * sizeof(T), cudaMemcpyHostToDevice);
+        cudaError_t err = cudaMemcpy(m_data, host_data, count * sizeof(T), cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA error in DeviceBuffer::copy_from_host: "
+                      << cudaGetErrorString(err) << std::endl;
+        }
     }
 #endif
 }
@@ -441,7 +452,11 @@ template<typename T>
 void DeviceBuffer<T>::copy_to_host(T* host_data, size_t count) const {
 #ifdef OPTMATH_USE_CUDA
     if (m_data && count <= m_size) {
-        cudaMemcpy(host_data, m_data, count * sizeof(T), cudaMemcpyDeviceToHost);
+        cudaError_t err = cudaMemcpy(host_data, m_data, count * sizeof(T), cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA error in DeviceBuffer::copy_to_host: "
+                      << cudaGetErrorString(err) << std::endl;
+        }
     }
 #endif
 }
