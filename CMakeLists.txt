@@ -14,6 +14,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Build all libraries with position-independent code (-fPIC)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 # Installation directories
 include(GNUInstallDirs)
 
