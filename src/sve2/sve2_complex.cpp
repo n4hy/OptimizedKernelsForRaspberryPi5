@@ -114,21 +114,29 @@ void sve2_complex_mul_interleaved_f32(float* out, const float* a,
         acc = svcmla_f32_z(pg, acc, va, vb, 90);   // imag contribution
 #else
         // Manual deinterleave and multiply without FCMA
-        // Extract even (real) and odd (imag) elements
-        svfloat32_t ar = svuzp1_f32(va, va);  // real parts of a
-        svfloat32_t ai = svuzp2_f32(va, va);  // imag parts of a
-        svfloat32_t br = svuzp1_f32(vb, vb);  // real parts of b
-        svfloat32_t bi = svuzp2_f32(vb, vb);  // imag parts of b
+        // For interleaved complex [re0,im0,re1,im1,...], use LD2 pattern
+        // svuzp1/2 with same operand doesn't correctly deinterleave a single vector.
+        // Instead, process element pairs: for each pair (re,im), compute complex mul.
+        // Use svtbl to extract even/odd elements within the vector.
+        svuint32_t idx_base = svindex_u32(0, 1); // [0,1,2,3,...]
+        svuint32_t idx_even = svlsl_n_u32_z(svptrue_b32(), idx_base, 1); // [0,2,4,6,...]
+        svuint32_t idx_odd = svadd_n_u32_z(svptrue_b32(), idx_even, 1);  // [1,3,5,7,...]
+
+        svfloat32_t ar = svtbl_f32(va, idx_even);  // real parts of a
+        svfloat32_t ai = svtbl_f32(va, idx_odd);   // imag parts of a
+        svfloat32_t br = svtbl_f32(vb, idx_even);  // real parts of b
+        svfloat32_t bi = svtbl_f32(vb, idx_odd);   // imag parts of b
 
         // out_re = ar*br - ai*bi
-        svfloat32_t or_val = svmul_f32_z(pg, ar, br);
-        or_val = svmls_f32_z(pg, or_val, ai, bi);
+        svbool_t pg_half = svwhilelt_b32((uint64_t)0, (uint64_t)(svcntw() / 2));
+        svfloat32_t or_val = svmul_f32_z(pg_half, ar, br);
+        or_val = svmls_f32_z(pg_half, or_val, ai, bi);
 
         // out_im = ar*bi + ai*br
-        svfloat32_t oi_val = svmul_f32_z(pg, ar, bi);
-        oi_val = svmla_f32_z(pg, oi_val, ai, br);
+        svfloat32_t oi_val = svmul_f32_z(pg_half, ar, bi);
+        oi_val = svmla_f32_z(pg_half, oi_val, ai, br);
 
-        // Re-interleave results
+        // Re-interleave results [re0,im0,re1,im1,...]
         svfloat32_t acc = svzip1_f32(or_val, oi_val);
 #endif
 
@@ -164,20 +172,26 @@ void sve2_complex_conj_mul_interleaved_f32(float* out, const float* a,
         acc = svcmla_f32_z(pg, acc, va, vb, 270);  // conjugate imag contribution
 #else
         // Manual deinterleave and conjugate multiply without FCMA
-        svfloat32_t ar = svuzp1_f32(va, va);
-        svfloat32_t ai = svuzp2_f32(va, va);
-        svfloat32_t br = svuzp1_f32(vb, vb);
-        svfloat32_t bi = svuzp2_f32(vb, vb);
+        // Use svtbl to correctly extract even/odd elements
+        svuint32_t idx_base = svindex_u32(0, 1);
+        svuint32_t idx_even = svlsl_n_u32_z(svptrue_b32(), idx_base, 1);
+        svuint32_t idx_odd = svadd_n_u32_z(svptrue_b32(), idx_even, 1);
+
+        svfloat32_t ar = svtbl_f32(va, idx_even);
+        svfloat32_t ai = svtbl_f32(va, idx_odd);
+        svfloat32_t br = svtbl_f32(vb, idx_even);
+        svfloat32_t bi = svtbl_f32(vb, idx_odd);
 
         // out_re = ar*br + ai*bi
-        svfloat32_t or_val = svmul_f32_z(pg, ar, br);
-        or_val = svmla_f32_z(pg, or_val, ai, bi);
+        svbool_t pg_half = svwhilelt_b32((uint64_t)0, (uint64_t)(svcntw() / 2));
+        svfloat32_t or_val = svmul_f32_z(pg_half, ar, br);
+        or_val = svmla_f32_z(pg_half, or_val, ai, bi);
 
         // out_im = ai*br - ar*bi
-        svfloat32_t oi_val = svmul_f32_z(pg, ai, br);
-        oi_val = svmls_f32_z(pg, oi_val, ar, bi);
+        svfloat32_t oi_val = svmul_f32_z(pg_half, ai, br);
+        oi_val = svmls_f32_z(pg_half, oi_val, ar, bi);
 
-        // Re-interleave results
+        // Re-interleave results [re0,im0,re1,im1,...]
         svfloat32_t acc = svzip1_f32(or_val, oi_val);
 #endif
 

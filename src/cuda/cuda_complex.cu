@@ -934,12 +934,9 @@ void cuda_fft_1d_f32(float* inout, size_t n, bool inverse) {
                  inverse ? CUFFT_INVERSE : CUFFT_FORWARD);
     cufftDestroy(plan);
 
-    // Normalize if inverse
+    // Note: IFFT normalization (1/N scaling) is performed by the caller
+    // (e.g., cuda_ifft() in the Eigen wrapper layer), not here.
     if (inverse) {
-        float scale = 1.0f / static_cast<float>(n);
-        int blocks = div_ceil(n * 2, BLOCK_SIZE);
-        // Scale both real and imaginary parts
-        // (using simple kernel since we're just scaling)
         cudaDeviceSynchronize();
     }
 #endif

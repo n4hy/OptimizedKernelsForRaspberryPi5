@@ -979,6 +979,104 @@ OptMathKernels/
 
 ## Recent Changes
 
+### v0.5.2 - Comprehensive Audit: Critical Bug Fixes Across All Backends (March 2026)
+
+**SVE2 Fixes:**
+
+- **Interleaved Complex Multiply Bug** (`sve2_complex.cpp`):
+  - Fixed incorrect deinterleave using `svuzp1_f32(va, va)` / `svuzp2_f32(va, va)` which duplicates elements instead of splitting even/odd
+  - Replaced with `svtbl_f32` index-based extraction for correct real/imaginary separation
+  - Affected: `sve2_complex_mul_interleaved_f32`, `sve2_complex_conj_mul_interleaved_f32`
+
+- **ODR Violation: Duplicate Function Definitions** (`sve2_kernels.cpp`):
+  - Removed ~580 lines of duplicate function definitions that were also defined in `sve2_complex.cpp` and `sve2_radar.cpp`
+  - Static library silently picked one copy, masking the One Definition Rule violation
+
+**Platform Fixes:**
+
+- **Feature Detection End-of-Line Bug** (`platform.cpp`):
+  - Fixed: `getline()` strips `\n`, so features at end of line (e.g., `" sve2"`) were missed by substring search
+  - Added space padding before search to ensure end-of-line features are found
+  - Features on heterogeneous CPUs (different Features lines) now detected correctly with `!info.has_*` guards
+
+- **sysconf Negative Return** (`platform.cpp`):
+  - `sysconf(_SC_NPROCESSORS_ONLN)` can return -1 on error; now guarded with fallback to 1
+
+**CUDA Fixes:**
+
+- **tanh NaN for Large Inputs** (`cuda_kernels.cu`):
+  - `__expf(2*x)` overflows for `|x| > ~20`, producing NaN
+  - Added input clamping: values beyond +/-20 return +/-1.0f directly
+
+- **Softmax Single-Block Limitation** (`cuda_kernels.cu`):
+  - Kernel assumed `n <= 256` (single block) but was called with arbitrary sizes, producing wrong results
+  - Added CPU fallback path for `n > BLOCK_SIZE`
+
+- **IFFT Dead Normalization Code** (`cuda_complex.cu`):
+  - Removed unused `scale` and `blocks` variables that computed normalization but never applied it
+
+- **CFAR 2D Row-Major vs Column-Major Mismatch** (`cuda_radar.cu`):
+  - CUDA kernel used row-major indexing (`d * n_range + r`) but Eigen `MatrixXf` is column-major
+  - Fixed all indexing to column-major (`d + r * n_doppler`)
+
+- **CPU Window Functions Divide-by-Zero** (`cuda_radar.cu`):
+  - Window generation with `n=1` caused division by `(n-1) = 0`
+  - Added safe divisor: `(n > 1) ? (n-1) : 1`
+
+**Vulkan Fixes:**
+
+- **SPIR-V File Read Overflow** (`vulkan_backend.cpp`):
+  - `tellg()` returns -1 on failure; cast to `size_t` produced a massive allocation
+  - Added check before cast
+
+- **Buffer Leak on Allocation Failure** (`vulkan_backend.cpp`):
+  - `vkCreateBuffer` succeeded but `vkAllocateMemory` failed, leaking the buffer handle
+  - Added `vkDestroyBuffer` cleanup before throwing
+
+- **Floating-Point log2 Truncation** (`vulkan_backend.cpp`):
+  - `bit_reverse_copy` and radix-4 power check used `(int)std::log2(N)`, which can truncate incorrectly (e.g., `log2(8) = 2.9999...` → 2)
+  - Replaced with integer bit-counting loop
+
+**Safety Guards:**
+
+- **NEON GEMM Buffer Overflow** (`neon_gemm_optimized.cpp`):
+  - Runtime MC/KC/NC from platform detection could exceed compile-time MAX constants
+  - Added `std::min` clamp to prevent stack buffer overflows
+
+- **IIR Validation Order** (`neon_iir.cpp`):
+  - `fc >= fs * 0.5f` was checked before `fs > 0`, causing UB when `fs = 0`
+  - Reordered: `fs > 0` check now comes first
+
+- **TRSV Zero-Diagonal Guard** (`neon_linalg.cpp`):
+  - Added check before division in `neon_trsv_lower_trans_f32` to prevent division by zero
+
+- **CUDA Buffer Move Semantics** (`cuda_backend.hpp`):
+  - `PinnedBuffer` and `UnifiedBuffer` had implicit copy constructors that would double-free
+  - Added deleted copy ops and proper move semantics
+
+**Test Quality Improvements:**
+
+- **Tolerance Fixes** (`test_neon_kernels.cpp`, `test_vulkan_vector.cpp`, `test_sve2_kernels.cpp`):
+  - Changed dot/norm tolerance from `1e-2 * N` to `1e-4f * N + 1e-2f` (was masking real bugs)
+
+- **Float Comparison** (`test_neon_kernels.cpp`):
+  - Changed `EXPECT_EQ` to `EXPECT_FLOAT_EQ` for reduce_max/min (bitwise vs ULP comparison)
+
+- **Type Mismatch** (`test_radar_caf.cpp`):
+  - `size_t max_idx` → `Eigen::Index max_idx` to match `maxCoeff()` signature
+
+- **Platform-Gated Assertions** (`test_platform.cpp`):
+  - L3 cache size and GEMM blocking assertions now gated on target platform detection
+  - Previously failed on any system without 8MB+ L3 cache
+
+- **Complex Dot Test Convention** (`test_sve2_kernels.cpp`):
+  - Test computed `sum(a * conj(b))` but kernel implements `sum(conj(a) * b)` (BLAS convention)
+  - Fixed test reference to match kernel
+
+**All 16 test suites pass (100%).**
+
+---
+
 ### v0.5.1 - Bug Fixes: Numerical Stability and Error Handling (March 2026)
 
 **Critical Bug Fixes:**

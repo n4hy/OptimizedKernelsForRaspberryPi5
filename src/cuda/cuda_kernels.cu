@@ -11,6 +11,7 @@
 #include "optmath/cuda_error.hpp"
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 #ifdef OPTMATH_USE_CUDA
 #include <cuda_runtime.h>
@@ -196,7 +197,10 @@ __global__ void kernel_tanh_f32(float* __restrict__ out,
                                  size_t n) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
-        float e2x = __expf(2.0f * in[idx]);
+        float val = in[idx];
+        if (val > 20.0f) { out[idx] = 1.0f; return; }
+        if (val < -20.0f) { out[idx] = -1.0f; return; }
+        float e2x = __expf(2.0f * val);
         out[idx] = (e2x - 1.0f) / (e2x + 1.0f);
     }
 }
@@ -963,10 +967,22 @@ void cuda_gelu_f32(float* out, const float* in, size_t n) {
 
 void cuda_softmax_f32(float* out, const float* in, size_t n) {
 #ifdef OPTMATH_USE_CUDA
-    // Note: This is a simplified single-block softmax
-    // For production, use a more sophisticated multi-block approach
-    kernel_softmax_f32<<<1, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(out, in, n);
-    CUDA_KERNEL_CHECK();
+    if (n <= BLOCK_SIZE) {
+        kernel_softmax_f32<<<1, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(out, in, n);
+    } else {
+        // CPU fallback for n > BLOCK_SIZE
+        std::vector<float> host_in(n), host_out(n);
+        cudaMemcpy(host_in.data(), in, n * sizeof(float), cudaMemcpyDeviceToHost);
+        float max_val = *std::max_element(host_in.begin(), host_in.end());
+        float sum = 0.0f;
+        for (size_t i = 0; i < n; ++i) {
+            host_out[i] = std::exp(host_in[i] - max_val);
+            sum += host_out[i];
+        }
+        for (size_t i = 0; i < n; ++i) host_out[i] /= sum;
+        cudaMemcpy(out, host_out.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    }
+    CUDA_CHECK_LAST();
 #endif
 }
 

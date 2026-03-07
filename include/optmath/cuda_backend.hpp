@@ -235,6 +235,26 @@ public:
     explicit PinnedBuffer(size_t count);
     ~PinnedBuffer();
 
+    // Prevent double-free from copies
+    PinnedBuffer(const PinnedBuffer&) = delete;
+    PinnedBuffer& operator=(const PinnedBuffer&) = delete;
+
+    // Move semantics
+    PinnedBuffer(PinnedBuffer&& other) noexcept : m_data(other.m_data), m_size(other.m_size) {
+        other.m_data = nullptr;
+        other.m_size = 0;
+    }
+    PinnedBuffer& operator=(PinnedBuffer&& other) noexcept {
+        if (this != &other) {
+            free();
+            m_data = other.m_data;
+            m_size = other.m_size;
+            other.m_data = nullptr;
+            other.m_size = 0;
+        }
+        return *this;
+    }
+
     void allocate(size_t count);
     void free();
 
@@ -256,6 +276,26 @@ public:
     UnifiedBuffer() = default;
     explicit UnifiedBuffer(size_t count);
     ~UnifiedBuffer();
+
+    // Prevent double-free from copies
+    UnifiedBuffer(const UnifiedBuffer&) = delete;
+    UnifiedBuffer& operator=(const UnifiedBuffer&) = delete;
+
+    // Move semantics
+    UnifiedBuffer(UnifiedBuffer&& other) noexcept : m_data(other.m_data), m_size(other.m_size) {
+        other.m_data = nullptr;
+        other.m_size = 0;
+    }
+    UnifiedBuffer& operator=(UnifiedBuffer&& other) noexcept {
+        if (this != &other) {
+            free();
+            m_data = other.m_data;
+            m_size = other.m_size;
+            other.m_data = nullptr;
+            other.m_size = 0;
+        }
+        return *this;
+    }
 
     void allocate(size_t count);
     void free();

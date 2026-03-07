@@ -54,14 +54,14 @@ TEST(VulkanVectorTest, BasicOperations) {
     {
         float expected = a.dot(b);
         float result = optmath::vulkan::vulkan_vec_dot(a, b);
-        // Dot product accumulates error, increase tolerance slightly
-        EXPECT_NEAR(result, expected, 1e-2 * N);
+        // Dot product accumulates error, tolerance scales with N
+        EXPECT_NEAR(result, expected, 1e-4f * N + 1e-2f);
     }
 
     // Norm
     {
         float expected = a.norm();
         float result = optmath::vulkan::vulkan_vec_norm(a);
-        EXPECT_NEAR(result, expected, 1e-2 * N);
+        EXPECT_NEAR(result, expected, 1e-4f * N + 1e-2f);
     }
 }

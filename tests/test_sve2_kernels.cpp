@@ -40,7 +40,7 @@ TEST(SVE2KernelTest, DotProduct_ExactMatch) {
         float expected = a.dot(b);
         float result = optmath::sve2::sve2_dot(a, b);
 
-        EXPECT_NEAR(result, expected, 1e-2f * N)
+        EXPECT_NEAR(result, expected, 1e-4f * N + 1e-2f)
             << "Dot product mismatch for size " << N;
     }
 }
@@ -158,10 +158,10 @@ TEST(SVE2KernelTest, ComplexDot_Accumulation) {
 
         std::complex<float> result = optmath::sve2::sve2_complex_dot(a, b);
 
-        // Manual reference: sum(a[i] * conj(b[i]))
+        // Manual reference: sum(conj(a[i]) * b[i]) — matches kernel convention
         std::complex<float> expected(0.0f, 0.0f);
         for (int i = 0; i < N; ++i) {
-            expected += a[i] * std::conj(b[i]);
+            expected += std::conj(a[i]) * b[i];
         }
 
         float tol = 1e-2f * std::sqrt(static_cast<float>(N));
@@ -539,7 +539,7 @@ TEST(SVE2KernelTest, LargeVector_1M) {
     {
         float expected = a.dot(b);
         float result = optmath::sve2::sve2_dot(a, b);
-        EXPECT_NEAR(result, expected, 1e-2f * N);
+        EXPECT_NEAR(result, expected, 1e-4f * N + 1e-2f);
     }
 }
 

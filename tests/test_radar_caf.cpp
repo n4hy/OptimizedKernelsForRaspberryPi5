@@ -43,7 +43,7 @@ TEST(RadarCAFTest, WindowGeneration) {
 
         // Other windows should have max near center
         if (type != WindowType::RECTANGULAR) {
-            size_t max_idx;
+            Eigen::Index max_idx;
             window.maxCoeff(&max_idx);
             EXPECT_NEAR(static_cast<float>(max_idx), N / 2.0f, N / 10.0f);
         }

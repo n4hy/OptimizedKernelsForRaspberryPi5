@@ -69,7 +69,8 @@ static CpuInfo build_cpu_info() {
 
 #ifdef __linux__
     // Count online CPUs
-    int n_cpus = static_cast<int>(sysconf(_SC_NPROCESSORS_ONLN));
+    long n_cpus_raw = sysconf(_SC_NPROCESSORS_ONLN);
+    int n_cpus = (n_cpus_raw > 0) ? static_cast<int>(n_cpus_raw) : 1;
     info.total_cores = n_cpus;
 
     // Parse /proc/cpuinfo for part IDs and model name
@@ -99,19 +100,22 @@ static CpuInfo build_cpu_info() {
                     // Trim leading whitespace
                     info.model_name.erase(0, info.model_name.find_first_not_of(" \t"));
                 }
-            } else if (line.find("Features") == 0 && !info.has_sve2) {
-                info.has_sve2 = (line.find(" sve2 ") != std::string::npos ||
-                                 line.find(" sve2\n") != std::string::npos ||
-                                 line.find("\tsve2 ") != std::string::npos);
-                info.has_fcma = (line.find(" fcma ") != std::string::npos ||
-                                 line.find(" fcma\n") != std::string::npos ||
-                                 line.find("\tfcma ") != std::string::npos);
-                info.has_i8mm = (line.find(" i8mm ") != std::string::npos ||
-                                 line.find(" i8mm\n") != std::string::npos ||
-                                 line.find("\ti8mm ") != std::string::npos);
-                info.has_bf16 = (line.find(" bf16 ") != std::string::npos ||
-                                 line.find(" bf16\n") != std::string::npos ||
-                                 line.find("\tbf16 ") != std::string::npos);
+            } else if (line.find("Features") == 0) {
+                // Pad line with space so end-of-line features are found
+                // (getline strips \n, so " sve2" at end would be missed)
+                std::string padded = line + " ";
+                if (!info.has_sve2)
+                    info.has_sve2 = (padded.find(" sve2 ") != std::string::npos ||
+                                     padded.find("\tsve2 ") != std::string::npos);
+                if (!info.has_fcma)
+                    info.has_fcma = (padded.find(" fcma ") != std::string::npos ||
+                                     padded.find("\tfcma ") != std::string::npos);
+                if (!info.has_i8mm)
+                    info.has_i8mm = (padded.find(" i8mm ") != std::string::npos ||
+                                     padded.find("\ti8mm ") != std::string::npos);
+                if (!info.has_bf16)
+                    info.has_bf16 = (padded.find(" bf16 ") != std::string::npos ||
+                                     padded.find("\tbf16 ") != std::string::npos);
             }
         }
     }

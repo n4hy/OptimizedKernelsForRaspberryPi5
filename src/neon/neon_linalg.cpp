@@ -162,6 +162,7 @@ void neon_trsv_lower_trans_f32(float* b, const float* L, std::size_t n, std::siz
         if (rem > 0) {
             sum = neon_dot_f32(L + j + 1 + j * ldl, b + j + 1, rem);
         }
+        if (L[j + j * ldl] == 0.0f) return; // singular
         b[j] = (b[j] - sum) / L[j + j * ldl];
     }
 }

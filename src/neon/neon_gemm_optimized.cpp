@@ -236,9 +236,9 @@ void neon_gemm_blocked_f32(
 
 #ifdef OPTMATH_USE_NEON
     // Runtime-selected cache blocking parameters
-    const size_t MC = get_mc();
-    const size_t KC = get_kc();
-    const size_t NC = get_nc();
+    const size_t MC = std::min(get_mc(), MC_MAX);
+    const size_t KC = std::min(get_kc(), KC_MAX);
+    const size_t NC = std::min(get_nc(), NC_MAX);
 
     // Initialize C to zero
     for (size_t j = 0; j < N; ++j) {

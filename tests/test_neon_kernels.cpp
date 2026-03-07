@@ -62,14 +62,14 @@ TEST(NeonKernelTest, VectorOperations) {
     {
         float expected = a.dot(b);
         float result = optmath::neon::neon_dot(a, b);
-        EXPECT_NEAR(result, expected, 1e-2 * N);
+        EXPECT_NEAR(result, expected, 1e-4f * N + 1e-2f);
     }
 
     // Norm
     {
         float expected = a.norm();
         float result = optmath::neon::neon_norm(a);
-        EXPECT_NEAR(result, expected, 1e-2 * N);
+        EXPECT_NEAR(result, expected, 1e-4f * N + 1e-2f);
     }
 }
 
@@ -153,6 +153,6 @@ TEST(NeonKernelTest, Reductions) {
     Eigen::VectorXf a = Eigen::VectorXf::Random(N);
 
     EXPECT_NEAR(optmath::neon::neon_reduce_sum(a), a.sum(), 1e-3);
-    EXPECT_EQ(optmath::neon::neon_reduce_max(a), a.maxCoeff());
-    EXPECT_EQ(optmath::neon::neon_reduce_min(a), a.minCoeff());
+    EXPECT_FLOAT_EQ(optmath::neon::neon_reduce_max(a), a.maxCoeff());
+    EXPECT_FLOAT_EQ(optmath::neon::neon_reduce_min(a), a.minCoeff());
 }

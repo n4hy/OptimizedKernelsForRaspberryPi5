@@ -71,16 +71,16 @@ static bool validate_iir_params(float fc, float fs, float Q, BiquadCoeffs& fallb
     fallback.a1 = 0.0f;
     fallback.a2 = 0.0f;
 
+    // Sample rate must be positive (check first since fs/2 depends on it)
+    if (fs <= 0.0f) {
+        return false;
+    }
     // Q must be positive to avoid division by zero
     if (Q <= 0.0f) {
         return false;
     }
     // Cutoff frequency must be in valid range (0, fs/2)
     if (fc <= 0.0f || fc >= fs * 0.5f) {
-        return false;
-    }
-    // Sample rate must be positive
-    if (fs <= 0.0f) {
         return false;
     }
     return true;

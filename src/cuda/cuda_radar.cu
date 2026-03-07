@@ -219,16 +219,18 @@ __global__ void kernel_cfar_2d_f32(int* __restrict__ detections,
             bool in_guard = (abs(d - doppler_idx) <= guard_doppler) &&
                            (abs(r - range_idx) <= guard_range);
             if (!in_guard) {
-                sum += power_map[d * n_range + r];
+                // Column-major indexing: element (row=d, col=r) is at d + r * n_doppler
+                sum += power_map[d + r * n_doppler];
                 count++;
             }
         }
     }
 
     float threshold = (count > 0) ? (sum / count) * pfa_factor : 0.0f;
-    float cell_power = power_map[doppler_idx * n_range + range_idx];
+    // Column-major indexing: element (row=doppler_idx, col=range_idx)
+    float cell_power = power_map[doppler_idx + range_idx * n_doppler];
 
-    detections[doppler_idx * n_range + range_idx] = (cell_power > threshold) ? 1 : 0;
+    detections[doppler_idx + range_idx * n_doppler] = (cell_power > threshold) ? 1 : 0;
 }
 
 // 1D CA-CFAR detector
@@ -506,23 +508,24 @@ Eigen::VectorXf cuda_generate_window(size_t n, WindowType type, float param) {
 cpu_fallback:
 #endif
     // Fallback: generate on CPU
+    float divisor = (n > 1) ? static_cast<float>(n - 1) : 1.0f;
     for (size_t i = 0; i < n; ++i) {
         switch (type) {
             case WindowType::RECTANGULAR:
                 window[i] = 1.0f;
                 break;
             case WindowType::HAMMING:
-                window[i] = 0.54f - 0.46f * std::cos(2.0f * PI * i / (n - 1));
+                window[i] = 0.54f - 0.46f * std::cos(2.0f * PI * i / divisor);
                 break;
             case WindowType::HANNING:
-                window[i] = 0.5f * (1.0f - std::cos(2.0f * PI * i / (n - 1)));
+                window[i] = 0.5f * (1.0f - std::cos(2.0f * PI * i / divisor));
                 break;
             case WindowType::BLACKMAN:
-                window[i] = 0.42f - 0.5f * std::cos(2.0f * PI * i / (n - 1))
-                          + 0.08f * std::cos(4.0f * PI * i / (n - 1));
+                window[i] = 0.42f - 0.5f * std::cos(2.0f * PI * i / divisor)
+                          + 0.08f * std::cos(4.0f * PI * i / divisor);
                 break;
             default:
-                window[i] = 0.54f - 0.46f * std::cos(2.0f * PI * i / (n - 1));
+                window[i] = 0.54f - 0.46f * std::cos(2.0f * PI * i / divisor);
                 break;
         }
     }

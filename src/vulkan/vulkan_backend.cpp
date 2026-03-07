@@ -45,7 +45,9 @@ static std::vector<char> readFile(const std::string& filename) {
     for (const auto& path : paths) {
         std::ifstream file(path, std::ios::ate | std::ios::binary);
         if (file.is_open()) {
-            size_t fileSize = (size_t) file.tellg();
+            std::streampos pos = file.tellg();
+            if (pos < 0) throw std::runtime_error("Failed to determine file size: " + filename);
+            size_t fileSize = static_cast<size_t>(pos);
             std::vector<char> buffer(fileSize);
             file.seekg(0);
             file.read(buffer.data(), fileSize);
@@ -80,6 +82,8 @@ static void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPr
     allocInfo.memoryTypeIndex = ctx.findMemoryType(memRequirements.memoryTypeBits, properties);
 
     if (vkAllocateMemory(device, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
+        vkDestroyBuffer(device, buffer, nullptr);
+        buffer = VK_NULL_HANDLE;
         throw std::runtime_error("failed to allocate buffer memory!");
     }
 
@@ -1128,7 +1132,8 @@ Eigen::VectorXf vulkan_scan_prefix_sum(const Eigen::VectorXf& a) {
 // Bit reversal helper
 static void bit_reverse_copy(const Eigen::VectorXf& in, Eigen::VectorXf& out) {
     size_t N = in.size() / 2; // Complex pairs
-    uint32_t levels = (uint32_t)std::log2(N);
+    uint32_t levels = 0;
+    for (size_t tmp = N; tmp > 1; tmp >>= 1) levels++;
     for (size_t i = 0; i < N; ++i) {
         // Reverse bits of i
         size_t r = 0;
@@ -1187,7 +1192,9 @@ void vulkan_fft_radix4(Eigen::VectorXf& data, bool inverse) {
 
     size_t N = data.size() / 2;
     // N must be power of 4
-    if ((N & (N - 1)) != 0 || (size_t)std::log2(N) % 2 != 0) {
+    uint32_t log2N = 0;
+    for (size_t tmp = N; tmp > 1; tmp >>= 1) log2N++;
+    if ((N & (N - 1)) != 0 || log2N % 2 != 0) {
         std::cerr << "[Vulkan] FFT Radix-4 requires size power of 4\n";
         return;
     }
