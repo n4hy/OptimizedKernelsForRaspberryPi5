@@ -20,6 +20,10 @@ if(ENABLE_SVE2 AND ON_ARM AND HAS_SVE2)
         sve2/sve2_radar.cpp
     )
 
+    # sve2_detect.cpp does runtime hwcap check — compiled WITHOUT SVE2 flags
+    # so it's safe to call on any AArch64 hardware.
+    list(APPEND SOURCES sve2/sve2_detect.cpp)
+
     # Build SVE2 arch flag string
     set(SVE2_ARCH_FLAGS "-march=armv9-a+sve2+bf16+i8mm")
 

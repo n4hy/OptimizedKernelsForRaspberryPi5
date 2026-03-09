@@ -13,13 +13,7 @@
 namespace optmath {
 namespace sve2 {
 
-bool is_available() {
-#ifdef OPTMATH_USE_SVE2
-    return true;
-#else
-    return false;
-#endif
-}
+// is_available() is in sve2_detect.cpp (compiled without SVE2 flags)
 
 // =========================================================================
 // Core Vector Operations (predicated - no scalar tail loops)

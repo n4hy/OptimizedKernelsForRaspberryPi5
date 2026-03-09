@@ -1097,6 +1097,51 @@ OptMathKernels/
 
 ## Recent Changes
 
+### v0.5.6 - SVE2 Runtime Detection, Platform Model Name Fallback (March 2026)
+
+**Bug Fixes:**
+
+- **SVE2 SIGILL on Non-SVE2 Hardware** (`sve2_detect.cpp`, `src/CMakeLists.txt`):
+  - `is_available()` was compiled with `-march=armv9-a+sve2` flags in `sve2_kernels.cpp`, causing SIGILL crash on hardware without SVE2 (e.g., Raspberry Pi 5 Cortex-A76)
+  - Moved `is_available()` to new `sve2_detect.cpp` compiled without SVE2 flags
+  - Now performs runtime detection via `getauxval(AT_HWCAP2) & HWCAP2_SVE2`
+  - SVE2 tests gracefully skip on non-SVE2 hardware instead of crashing
+
+- **Platform CPU Model Name Empty on ARM Kernels** (`platform.cpp`):
+  - Raspberry Pi 5 `/proc/cpuinfo` lacks the `model name` field, causing `DetectCPUInfo` test failure
+  - Added fallback that maps ARM CPU part IDs to model names (e.g., `0xd0b` → "Cortex-A76", `0xd81` → "Cortex-A720")
+  - Covers Cortex-A53 through Cortex-X4
+
+**All 16 test suites pass (100%) on Raspberry Pi 5.**
+
+---
+
+### v0.5.5 - NEON Kernel Audit: Pipeline Optimization, Allocation Elimination (March 2026)
+
+**Performance Optimizations:**
+
+- **Dot Product / Reduce Sum** (`neon_kernels.cpp`):
+  - 4 independent accumulators to break FMA dependency chain (A76: 4-cycle latency, 2 pipelines)
+
+- **Transcendentals** (`neon_kernels.cpp`):
+  - `neon_fast_cos_f32`: inline sin polynomial with π/2 offset, eliminate `std::vector` heap allocation
+  - `neon_fast_sigmoid_f32`: fused single-pass with inline exp(-x), eliminate 2 heap allocations per call
+  - `neon_fast_tanh_f32`: fused single-pass with inline exp(-2x) + sigmoid, eliminate 4 heap allocations per call
+
+- **GEMM** (`neon_gemm_optimized.cpp`):
+  - `micro_kernel_8x8`: column-oriented accumulators for vector store (16 vector ops vs 64 scalar `vgetq_lane_f32` extractions)
+  - `neon_gemm_blocked` Eigen wrapper: enable actual blocked GEMM path
+
+- **Complex Exponential** (`neon_complex.cpp`):
+  - `neon_complex_exp_f32`: vectorize using `neon_fast_sin/cos_f32`
+
+**Vulkan Fix:**
+
+- **SPV Shader Discovery for FetchContent** (`vulkan_backend.cpp`, `src/CMakeLists.txt`):
+  - Added `OPTMATH_SPV_BUILD_DIR` compile definition so Vulkan backend locates compiled SPIR-V shaders when used via CMake FetchContent
+
+---
+
 ### v0.5.4 - Orange Pi 6 Plus Full Audit, Build, and Benchmark (March 2026)
 
 **Build and Installation Verified** on Orange Pi 6 Plus (CIX P1 CD8160, Cortex-A720, Mali-G720-Immortalis):

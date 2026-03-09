@@ -120,6 +120,41 @@ static CpuInfo build_cpu_info() {
         }
     }
 
+    // Fallback: if /proc/cpuinfo lacks "model name" (common on ARM kernels),
+    // derive it from the CPU part ID.
+    if (info.model_name.empty() && !part_ids.empty()) {
+        uint32_t part = part_ids[0];
+        switch (part) {
+            case 0xd03: info.model_name = "Cortex-A53"; break;
+            case 0xd04: info.model_name = "Cortex-A35"; break;
+            case 0xd05: info.model_name = "Cortex-A55"; break;
+            case 0xd07: info.model_name = "Cortex-A57"; break;
+            case 0xd08: info.model_name = "Cortex-A72"; break;
+            case 0xd09: info.model_name = "Cortex-A73"; break;
+            case 0xd0a: info.model_name = "Cortex-A75"; break;
+            case 0xd0b: info.model_name = "Cortex-A76"; break;
+            case 0xd0d: info.model_name = "Cortex-A77"; break;
+            case 0xd41: info.model_name = "Cortex-A78"; break;
+            case 0xd44: info.model_name = "Cortex-X1"; break;
+            case 0xd46: info.model_name = "Cortex-A510"; break;
+            case 0xd47: info.model_name = "Cortex-A710"; break;
+            case 0xd48: info.model_name = "Cortex-X2"; break;
+            case 0xd4d: info.model_name = "Cortex-A715"; break;
+            case 0xd4e: info.model_name = "Cortex-X3"; break;
+            case 0xd80: info.model_name = "Cortex-A520"; break;
+            case 0xd81: info.model_name = "Cortex-A720"; break;
+            case 0xd82: info.model_name = "Cortex-X4"; break;
+            default:
+                info.model_name = "ARM (part 0x" +
+                    ([](uint32_t v) {
+                        char buf[16];
+                        snprintf(buf, sizeof(buf), "%03x", v);
+                        return std::string(buf);
+                    })(part) + ")";
+                break;
+        }
+    }
+
     // Build per-core info from sysfs
     info.cores.resize(n_cpus);
     for (int i = 0; i < n_cpus; ++i) {
