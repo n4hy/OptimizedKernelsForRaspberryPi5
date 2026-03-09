@@ -979,6 +979,40 @@ OptMathKernels/
 
 ## Recent Changes
 
+### v0.5.3 - Audit Review: Vulkan Fixes, False Positives Removed (March 2026)
+
+**Vulkan Bug Fixes:**
+
+- **Unchecked `vkBindBufferMemory`** (`vulkan_backend.cpp:90`):
+  - Return value was silently ignored; can fail with `VK_ERROR_OUT_OF_DEVICE_MEMORY`
+  - Added error check with proper cleanup (free memory, destroy buffer) before throwing
+
+- **Memory Barrier Spec Violation** (`vulkan_backend.cpp:500-507`):
+  - `VK_PIPELINE_STAGE_HOST_BIT` was used as destination stage in `vkCmdPipelineBarrier`, which is invalid per Vulkan spec
+  - Removed `HOST_BIT` and `HOST_READ_BIT`; host visibility is guaranteed by `HOST_COHERENT_BIT` on all buffers + `vkQueueWaitIdle`
+
+- **FFT Float log2 Truncation** (`vulkan_backend.cpp:1171,1220`):
+  - Radix-2 FFT used `(uint32_t)std::log2(N)` which can truncate incorrectly (e.g., `log2(8) = 2.9999...` → 2)
+  - Replaced with integer bit-counting loop (radix-4 already had a loop but redundantly called `std::log2` again)
+
+**Audit Plan Corrections (5 false positives removed):**
+
+- **Issue 14** (NEON Conv2D out-of-bounds): Loop condition `c + 3 < out_cols` with `out_cols = in_cols - kernel_cols + 1` ensures max access = `in_cols - 1` (last valid index). Algebraically proven safe for all conv variants.
+- **Issue 37** (SVE2 FCMA complex multiply): `svcmla` with rotations 0 and 90 is the correct way to multiply interleaved complex data — the instruction natively operates on `[re, im]` pairs
+- **Issue 17** (NEON complex magnitude): Newton-Raphson via `vrsqrteq_f32` + 2x `vrsqrtsq_f32` is mathematically correct (~24-bit accuracy)
+- **Issue 33** (Vulkan host coherency): `HOST_COHERENT_BIT` is set on all buffers
+- **Issue 15** (Householder sign): Standard QR sign selection with `1e-30` denominator guard
+
+**Audit Plan Status Updates (4 issues already fixed but not tracked):**
+
+- Issues 6, 7 (CUDA window div/0 and dot product race) were fixed in v0.5.2 but audit plan still listed them as OPEN
+- Issues 11, 12 (Vulkan resource leaks and command buffer check) were already properly handled
+- Issue 22 line reference corrected: CAF Doppler phase is in `sve2_radar.cpp:43-50`, not `sve2_kernels.cpp:1095-1106`
+
+**All 16 test suites pass (100%).**
+
+---
+
 ### v0.5.2 - Comprehensive Audit: Critical Bug Fixes Across All Backends (March 2026)
 
 **SVE2 Fixes:**

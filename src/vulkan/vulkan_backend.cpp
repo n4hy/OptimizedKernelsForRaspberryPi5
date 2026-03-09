@@ -87,7 +87,13 @@ static void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPr
         throw std::runtime_error("failed to allocate buffer memory!");
     }
 
-    vkBindBufferMemory(device, buffer, bufferMemory, 0);
+    if (vkBindBufferMemory(device, buffer, bufferMemory, 0) != VK_SUCCESS) {
+        vkFreeMemory(device, bufferMemory, nullptr);
+        vkDestroyBuffer(device, buffer, nullptr);
+        buffer = VK_NULL_HANDLE;
+        bufferMemory = VK_NULL_HANDLE;
+        throw std::runtime_error("failed to bind buffer memory!");
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -497,13 +503,14 @@ static void run_compute(const std::string& shaderName,
     }
     vkCmdDispatch(commandBuffer, groupCountX, groupCountY, groupCountZ);
 
-    // Pipeline barrier to ensure compute shader writes are visible before host reads
+    // Pipeline barrier to ensure compute shader writes complete before submission ends.
+    // Host visibility is guaranteed by HOST_COHERENT_BIT on buffers + vkQueueWaitIdle below.
     VkMemoryBarrier memBarrier{};
     memBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+    memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          0, 1, &memBarrier, 0, nullptr, 0, nullptr);
 
     result = vkEndCommandBuffer(commandBuffer);
@@ -1168,7 +1175,8 @@ void vulkan_fft_radix2(Eigen::VectorXf& data, bool inverse) {
     BufferWrapper buf(sizeBytes);
     buf.mapAndCopyFrom(reversed.data());
 
-    uint32_t stages = (uint32_t)std::log2(N);
+    uint32_t stages = 0;
+    for (size_t tmp = N; tmp > 1; tmp >>= 1) stages++;
     std::string shader = inverse ? "ifft_radix2.comp.spv" : "fft_radix2.comp.spv";
 
     for (uint32_t s = 0; s < stages; ++s) {
@@ -1217,7 +1225,7 @@ void vulkan_fft_radix4(Eigen::VectorXf& data, bool inverse) {
     BufferWrapper buf(sizeBytes);
     buf.mapAndCopyFrom(reversed.data());
 
-    uint32_t stages = (uint32_t)(std::log2(N) / 2); // log4(N) = log2(N)/2
+    uint32_t stages = log2N / 2; // log4(N) = log2(N)/2
     std::string shader = inverse ? "ifft_radix4.comp.spv" : "fft_radix4.comp.spv";
 
     for (uint32_t s = 0; s < stages; ++s) {
