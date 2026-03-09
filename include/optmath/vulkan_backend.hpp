@@ -45,7 +45,9 @@ namespace vulkan {
 
     private:
         VulkanContext() = default;
-        ~VulkanContext() { cleanup(); }
+        ~VulkanContext() {
+            try { cleanup(); } catch (...) {}
+        }
         bool initialized = false;
 #ifdef OPTMATH_USE_VULKAN
         VkInstance instance = VK_NULL_HANDLE;

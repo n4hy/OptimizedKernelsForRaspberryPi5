@@ -27,6 +27,7 @@ While remaining compatible with standard Linux x86/ARM environments.
 - [API Reference](#api-reference)
 - [Usage Examples](#usage-examples)
 - [Benchmarking](#benchmarking)
+  - [Orange Pi 6 Plus Benchmark Results](#orange-pi-6-plus-benchmark-results)
 - [Troubleshooting](#troubleshooting)
 - [File Structure](#file-structure)
 - [License](#license)
@@ -309,7 +310,7 @@ cat /proc/cpuinfo | grep avx2
 | **Shared Memory** | 4KB per workgroup |
 | **Max Workgroup Size** | 256 |
 
-**Vulkan Compute Shaders**: 39 GLSL compute shaders compiled to SPIR-V:
+**Vulkan Compute Shaders**: 40 GLSL compute shaders compiled to SPIR-V:
 - Vector operations (add, sub, mul, div, dot, norm)
 - Matrix operations (add, mul, transpose, scale)
 - Reductions (sum, max, min, prefix scan)
@@ -814,6 +815,122 @@ BM_NEON_ComplexMul/65536      0.1 ms    0.1 ms   6200  Elements/s=655M
 BM_CAF_NEON/4096x64x256       4.8 ms    4.7 ms    148  CAF/s=212
 ```
 
+### Orange Pi 6 Plus Benchmark Results
+
+Tested on CIX P1 CD8160 (12x cores: 8x Cortex-A720 + 4x Cortex-A520) @ 2.6 GHz, Mali-G720-Immortalis GPU (Vulkan 1.3.275). All benchmarks compiled with `-march=armv9-a+sve2+bf16+i8mm`, C++20.
+
+#### NEON GEMM (Matrix Multiplication)
+
+| Benchmark | Size | Time | FLOPS | Notes |
+|-----------|------|------|-------|-------|
+| **NEON GEMM 4x4** | 16 | 28.9 ns | 17.7 GFLOPS | Micro-kernel |
+| **NEON GEMM 4x4** | 128 | 236 ns | 17.4 GFLOPS | L1-resident |
+| **NEON GEMM 4x4** | 1024 | 1.84 μs | 17.8 GFLOPS | Streaming |
+| **NEON GEMM Blocked** | 32 | 4.32 μs | 15.2 GFLOPS | Cache-blocked |
+| **NEON GEMM Blocked** | 256 | 3.10 ms | 10.8 GFLOPS | L3-resident |
+| **NEON GEMM Blocked** | 512 | 28.0 ms | 9.57 GFLOPS | Beyond L3 |
+| **Eigen GEMM** | 32 | 2.17 μs | 30.3 GFLOPS | Reference |
+| **Eigen GEMM** | 256 | 880 μs | 38.1 GFLOPS | Highly optimized |
+| **Eigen GEMM** | 512 | 6.85 ms | 39.2 GFLOPS | AVX-class perf |
+| **NEON MatVec** | 1024 | 211 μs | 9.93 GFLOPS | Matrix-vector |
+| **NEON MatVec** | 2048 | 831 μs | 10.1 GFLOPS | Large |
+
+#### NEON Transcendentals (Speedup vs std:: scalar)
+
+| Function | Size | NEON FLOPS | std:: FLOPS | Speedup |
+|----------|------|-----------|-------------|---------|
+| **exp** | 1M | 8.53 GFLOPS | 261 MFLOPS | **32.7x** |
+| **sin** | 1M | 8.53 GFLOPS | 228 MFLOPS | **37.4x** |
+| **cos** | 1M | 7.42 GFLOPS | — | ~33x |
+| **sigmoid** | 256K | 8.10 GFLOPS | 408 MFLOPS | **19.9x** |
+| **tanh** | 256K | 8.65 GFLOPS | 73.8 MFLOPS | **117x** |
+| **ReLU** | 1M | 34.2 GB/s | — | Memory-bound |
+
+#### NEON DSP (Signal Processing)
+
+| Benchmark | Size | Time | Throughput |
+|-----------|------|------|------------|
+| **FIR Filter** | 16K samples, 64 taps | 186 μs | 11.2 GFLOPS |
+| **FIR Filter** | 64K samples, 128 taps | 1.59 ms | 10.5 GFLOPS |
+| **Cross-Correlation** | 4096 | 3.79 ms | 8.85 GFLOPS |
+| **Complex Multiply** | 4096 | 8.46 μs | 2.91 GFLOPS |
+| **Complex Magnitude** | 64K | 90.2 μs | 2.91 GFLOPS |
+| **Dot Product (NEON)** | 256K | 61.0 μs | 8.60 GFLOPS |
+| **Dot Product (Eigen)** | 256K | 48.0 μs | 10.9 GFLOPS |
+
+#### Vulkan GPU (Mali-G720-Immortalis)
+
+| Benchmark | Size | Wall Time | GPU FLOPS | Notes |
+|-----------|------|-----------|-----------|-------|
+| **Matrix Multiply** | 64x64 | 226 μs | 5.59 GFLOPS | Setup overhead |
+| **Matrix Multiply** | 256x256 | 1.23 ms | 108 GFLOPS | Tiled 32x32 |
+| **Matrix Multiply** | 512x512 | 7.27 ms | 229 GFLOPS | Sweet spot |
+| **Matrix Multiply** | 1024x1024 | 51.0 ms | **481 GFLOPS** | Peak compute |
+| **Vec Add** | 1M | 3.44 ms | 5.07 GB/s | Memory-bound |
+| **Vec Add** | 4M | 14.7 ms | 4.39 GB/s | Large transfer |
+
+#### Radar Signal Processing
+
+| Benchmark | Parameters | Time | FLOPS |
+|-----------|-----------|------|-------|
+| **CAF** | 4096 samples, 41 Doppler, 100 range | 10.3 ms | 16.3 GFLOPS |
+| **CAF** | 16384 samples, 61 Doppler, 200 range | 114 ms | 17.6 GFLOPS |
+| **CAF** | 65536 samples, 101 Doppler, 500 range | 1.88 s | 17.7 GFLOPS |
+| **CFAR CA 1D** | 64K samples | 7.07 ms | 1.19 GFLOPS |
+| **CFAR 2D** | 256x512 range-Doppler | 34.9 ms | 241 MFLOPS |
+| **CFAR 2D** | 512x1024 range-Doppler | 140 ms | 239 MFLOPS |
+| **NLMS Filter** | 64K samples, 64 taps | 4.23 ms | 3.97 GFLOPS |
+| **NLMS Filter** | 256K samples, 128 taps | 33.5 ms | 4.01 GFLOPS |
+| **MTI Filter** | 256 pulses x 2048 range | 2.60 ms | 1.21 GFLOPS |
+| **Beamform (Phase)** | 8 elements, 16K samples | 271 μs | 3.88 GFLOPS |
+| **Beamform (Delay-Sum)** | 16 elements, 64K samples | 2.67 ms | 788 MFLOPS |
+| **Steering Vector** | 64 elements | 19.9 μs | 99.9 M items/s |
+
+#### Demo Application Output
+
+```
+OptMathKernels Benchmark (N=1000000)
+------------------------------------------
+NEON: Available
+Vulkan: Available (GPU initialized) — Mali-G720-Immortalis
+
+--- Dot Product ---
+Eigen (CPU): 0.287 ms, Result: -95.2917
+NEON       : 0.278 ms, Result: -95.2971 (Diff: 0.005)
+Vulkan     : 12.4 ms,  Result: -95.2891 (Diff: 0.003)
+
+--- Vector Addition ---
+Eigen (CPU): 1.59 ms
+NEON       : 1.40 ms, Norm Diff: 0
+Vulkan     : 7.71 ms, Norm Diff: 0
+
+--- FIR Filter (Small Input) ---
+Naive CPU  : 0.858 ms
+NEON       : 0.243 ms, Norm Diff: 8.16e-05 (3.5x speedup)
+Vulkan     : 6.84 ms,  Norm Diff: 8.16e-05
+```
+
+#### Test Results (Orange Pi 6 Plus — 16/16 Suites Pass)
+
+| Test Suite | Tests | Status | Backend |
+|------------|-------|--------|---------|
+| `test_basic` | 1 | Passed | Core |
+| `test_neon_kernels` | 4 | Passed | NEON |
+| `test_neon_complex` | 7 | Passed | NEON |
+| `test_neon_transcendentals` | 10 | Passed | NEON |
+| `test_neon_resample` | 7 | Passed | NEON |
+| `test_neon_iir` | 10 | Passed | NEON |
+| `test_neon_conv2d` | 9 | Passed | NEON |
+| `test_neon_linalg` | 21 | Passed | NEON |
+| `test_sve2_kernels` | 18 | Passed | SVE2 |
+| `test_platform` | 9 | Passed | Platform |
+| `test_vulkan_vector` | 1 | Passed | Vulkan |
+| `test_vulkan_matrix` | 1 | Passed | Vulkan |
+| `test_vulkan_dsp` | 1 | Passed | Vulkan |
+| `test_vulkan_advanced` | 2 | Passed | Vulkan |
+| `test_radar_caf` | 6 | Passed | Radar |
+| `test_radar_cfar` | 9 | Passed | Radar |
+
 ---
 
 ## Troubleshooting
@@ -924,7 +1041,7 @@ OptMathKernels/
 │   │   └── platform.cpp            # CPU topology, thread affinity, cache detection
 │   ├── vulkan/
 │   │   ├── vulkan_backend.cpp      # Vulkan context & dispatch (Mali-G720 auto-detect)
-│   │   └── shaders/                # 39 GLSL compute shaders
+│   │   └── shaders/                # 40 GLSL compute shaders
 │   │       ├── vec_add.comp.glsl
 │   │       ├── mat_mul_tiled.comp.glsl
 │   │       ├── mat_mul_tiled_mali.comp.glsl  # 32x32 tiles for Mali-G720
@@ -932,7 +1049,7 @@ OptMathKernels/
 │   │       ├── fft_radix2.comp.glsl
 │   │       ├── caf_doppler_shift.comp.glsl
 │   │       ├── cfar_2d.comp.glsl
-│   │       └── ... (32 more shaders)
+│   │       └── ... (33 more shaders)
 │   └── cuda/
 │       ├── cuda_backend.cpp        # Context, memory management
 │       ├── cuda_kernels.cu         # Vector ops, transcendentals
@@ -958,6 +1075,7 @@ OptMathKernels/
 ├── benchmarks/
 │   ├── bench_neon_transcendentals.cpp
 │   ├── bench_neon_gemm.cpp
+│   ├── bench_neon_fft.cpp
 │   ├── bench_vulkan_matmul.cpp
 │   └── bench_radar_caf.cpp
 ├── examples/
@@ -978,6 +1096,69 @@ OptMathKernels/
 ---
 
 ## Recent Changes
+
+### v0.5.4 - Orange Pi 6 Plus Full Audit, Build, and Benchmark (March 2026)
+
+**Build and Installation Verified** on Orange Pi 6 Plus (CIX P1 CD8160, Cortex-A720, Mali-G720-Immortalis):
+- All backends enabled: NEON, SVE2 (FCMA/I8MM), Vulkan 1.3
+- Library, 40 SPIR-V shaders, 16 tests, 5 benchmarks, demo all compile cleanly
+- `make install` verified with CMake package config
+
+**Bug Fixes (Build):**
+
+- **SPIR-V 1.3 Target for Mali Subgroup Shaders** (`src/CMakeLists.txt`):
+  - `reduce_sum_mali.comp.glsl` uses `subgroupAdd()` which requires SPIR-V 1.3
+  - `glslangValidator` was invoked with default SPIR-V 1.0 target, causing compilation failure
+  - Added `--target-env vulkan1.1` to all shader compilation commands (Vulkan 1.1 implies SPIR-V 1.3)
+
+- **Vulkan WSI Layer Static Destruction Crash** (`vulkan_backend.cpp`, `vulkan_backend.hpp`):
+  - All 4 Vulkan tests passed assertions but crashed during program exit with `unordered_map::at`
+  - Root cause: Mesa's `libVkLayer_window_system_integration.so` destroys its internal `unordered_map` before the static `VulkanContext` singleton runs its destructor, causing `vkDestroyDevice` to crash inside the WSI layer
+  - Fixed by registering `std::atexit()` handler in `VulkanContext::init()` to run cleanup before static destruction order conflicts
+  - Added `vkDeviceWaitIdle()` before resource teardown
+  - Added try-catch in destructor as safety net
+
+**Bug Fixes (Deep Source Audit — CRITICAL):**
+
+- **Cross-Correlation OOB Reads** (`neon_radar.cpp`, `sve2_radar.cpp`):
+  - When `nx > ny`, overlap computation `y_offset + len > ny` causes out-of-bounds reads on the y array
+  - Fixed in all 4 functions: `xcorr_f32` and `xcorr_complex_f32` for both NEON and SVE2 backends
+  - Added `len` clamping to `ny - y_offset` and zero-input early-return guards
+
+**Bug Fixes (Deep Source Audit — MODERATE):**
+
+- **MTI Filter Unsigned Underflow** (`neon_radar.cpp`):
+  - `n_pulses - n_coeffs + 1` wraps to `SIZE_MAX` when `n_pulses < n_coeffs` (unsigned arithmetic)
+  - Added early-return guards in both `mti_filter_f32` and the Eigen wrapper
+
+- **Vulkan Init Retry Leaks Handles** (`vulkan_backend.cpp`):
+  - Partial failure during `VulkanContext::init()` left Vulkan handles allocated; retry overwrote them
+  - Added `cleanup()` call before re-init if `device` or `instance` are already non-null
+
+- **Vulkan vkMapMemory Unchecked** (`vulkan_backend.cpp`):
+  - `mapAndCopyFrom` ignored `vkMapMemory` return value; would crash on mapping failure
+  - Added error check with `throw std::runtime_error` on failure
+
+**Bug Fixes (Deep Source Audit — LOW):**
+
+- **NEON Sin Scalar Tail UB** (`neon_kernels.cpp`):
+  - `(int)k` cast of large float is undefined behavior when float exceeds `INT_MAX`
+  - Changed to `(int64_t)k` to handle full float range
+
+- **SPIR-V Alignment** (`vulkan_backend.cpp`):
+  - `readFile` returns `vector<char>` (1-byte alignment) but Vulkan requires `uint32_t`-aligned `pCode`
+  - Fixed by padding buffer size to 4-byte alignment boundary
+
+**Benchmark Results Added:**
+- Complete Orange Pi 6 Plus benchmark results for all 5 benchmark suites
+- NEON GEMM: 17.8 GFLOPS (4x4 micro-kernel), Eigen reference: 39.2 GFLOPS
+- NEON transcendentals: exp 32.7x, sin 37.4x, tanh 117x faster than std::
+- Vulkan MatMul on Mali-G720: 481 GFLOPS peak at 1024x1024
+- Radar CAF: 17.7 GFLOPS sustained for 65K-sample processing
+
+**All 16 test suites pass (100%) on Orange Pi 6 Plus.**
+
+---
 
 ### v0.5.3 - Audit Review: Vulkan Fixes, False Positives Removed (March 2026)
 

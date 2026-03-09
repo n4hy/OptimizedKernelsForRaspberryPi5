@@ -103,6 +103,7 @@ void sve2_caf_f32(float* out_mag,
 void sve2_xcorr_f32(float* out, const float* x, std::size_t nx,
                      const float* y, std::size_t ny) {
     // Full cross-correlation: output size = nx + ny - 1
+    if (nx == 0 || ny == 0) return;
     std::size_t out_len = nx + ny - 1;
 
     for (std::size_t k = 0; k < out_len; ++k) {
@@ -112,6 +113,10 @@ void sve2_xcorr_f32(float* out, const float* x, std::size_t nx,
         std::size_t y_offset = (k >= ny - 1) ? (k - ny + 1) : 0;
 
         std::size_t len = x_end - x_start;
+        // Clamp length so y_offset + len <= ny
+        if (y_offset + len > ny) {
+            len = (ny > y_offset) ? ny - y_offset : 0;
+        }
         const float* xp = x + x_start;
         const float* yp = y + y_offset;
         uint64_t len_u64 = static_cast<uint64_t>(len);
@@ -144,6 +149,7 @@ void sve2_xcorr_complex_f32(float* out_re, float* out_im,
                              const float* x_re, const float* x_im, std::size_t nx,
                              const float* y_re, const float* y_im, std::size_t ny) {
     // Complex cross-correlation: x * conj(y)
+    if (nx == 0 || ny == 0) return;
     std::size_t out_len = nx + ny - 1;
 
     for (std::size_t k = 0; k < out_len; ++k) {
@@ -152,6 +158,10 @@ void sve2_xcorr_complex_f32(float* out_re, float* out_im,
         std::size_t y_offset = (k >= ny - 1) ? (k - ny + 1) : 0;
 
         std::size_t len = x_end - x_start;
+        // Clamp length so y_offset + len <= ny
+        if (y_offset + len > ny) {
+            len = (ny > y_offset) ? ny - y_offset : 0;
+        }
         const float* xrp = x_re + x_start;
         const float* xip = x_im + x_start;
         const float* yrp = y_re + y_offset;

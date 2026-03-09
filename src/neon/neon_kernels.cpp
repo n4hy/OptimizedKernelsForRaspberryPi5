@@ -511,7 +511,7 @@ void neon_fast_sin_f32(float* out, const float* in, std::size_t n) {
         p = c1 + p * x2;
         p = p * x;
 
-        if ((int)k & 1) p = -p;
+        if ((int64_t)k & 1) p = -p;
         out[i] = p;
     }
 #else

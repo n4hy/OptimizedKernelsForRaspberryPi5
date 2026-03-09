@@ -117,7 +117,7 @@ if(ENABLE_VULKAN)
 
              add_custom_command(
                 OUTPUT ${OUTPUT_FILE}
-                COMMAND ${GLSLANG_VALIDATOR} -V ${SOURCE_FILE} -o ${OUTPUT_FILE}
+                COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.1 ${SOURCE_FILE} -o ${OUTPUT_FILE}
                 DEPENDS ${SOURCE_FILE}
                 COMMENT "Compiling ${SHADER} to SPIR-V"
             )

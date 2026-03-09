@@ -156,6 +156,7 @@ void xcorr_f32(float* out, const float* x, std::size_t nx,
     // For k = 0: y is shifted all the way right, minimal overlap
     // For k = ny-1: y is aligned with x starting at 0
 
+    if (nx == 0 || ny == 0) return;
     std::size_t out_len = nx + ny - 1;
 
     for (std::size_t k = 0; k < out_len; ++k) {
@@ -168,8 +169,13 @@ void xcorr_f32(float* out, const float* x, std::size_t nx,
         // Map to y indices
         std::size_t y_offset = (k >= ny - 1) ? (k - ny + 1) : 0;
 
-#ifdef OPTMATH_USE_NEON
+        // Clamp length so y_offset + len <= ny
         std::size_t len = x_end - x_start;
+        if (y_offset + len > ny) {
+            len = (ny > y_offset) ? ny - y_offset : 0;
+        }
+
+#ifdef OPTMATH_USE_NEON
         const float* xp = x + x_start;
         const float* yp = y + y_offset;
 
@@ -186,8 +192,8 @@ void xcorr_f32(float* out, const float* x, std::size_t nx,
             sum += xp[i] * yp[i];
         }
 #else
-        for (std::size_t i = x_start; i < x_end; ++i) {
-            sum += x[i] * y[i - x_start + y_offset];
+        for (std::size_t i = 0; i < len; ++i) {
+            sum += x[x_start + i] * y[y_offset + i];
         }
 #endif
         out[k] = sum;
@@ -198,6 +204,7 @@ void xcorr_complex_f32(float* out_re, float* out_im,
                        const float* x_re, const float* x_im, std::size_t nx,
                        const float* y_re, const float* y_im, std::size_t ny) {
     // Complex cross-correlation: x * conj(y)
+    if (nx == 0 || ny == 0) return;
     std::size_t out_len = nx + ny - 1;
 
     for (std::size_t k = 0; k < out_len; ++k) {
@@ -207,8 +214,13 @@ void xcorr_complex_f32(float* out_re, float* out_im,
         std::size_t x_end = std::min(nx, out_len - k);
         std::size_t y_offset = (k >= ny - 1) ? (k - ny + 1) : 0;
 
-#ifdef OPTMATH_USE_NEON
+        // Clamp length so y_offset + len <= ny
         std::size_t len = x_end - x_start;
+        if (y_offset + len > ny) {
+            len = (ny > y_offset) ? ny - y_offset : 0;
+        }
+
+#ifdef OPTMATH_USE_NEON
         const float* xrp = x_re + x_start;
         const float* xip = x_im + x_start;
         const float* yrp = y_re + y_offset;
@@ -239,10 +251,11 @@ void xcorr_complex_f32(float* out_re, float* out_im,
             sum_im += xip[i] * yrp[i] - xrp[i] * yip[i];
         }
 #else
-        for (std::size_t i = x_start; i < x_end; ++i) {
-            std::size_t yi = i - x_start + y_offset;
-            sum_re += x_re[i] * y_re[yi] + x_im[i] * y_im[yi];
-            sum_im += x_im[i] * y_re[yi] - x_re[i] * y_im[yi];
+        for (std::size_t i = 0; i < len; ++i) {
+            std::size_t xi = x_start + i;
+            std::size_t yi = y_offset + i;
+            sum_re += x_re[xi] * y_re[yi] + x_im[xi] * y_im[yi];
+            sum_im += x_im[xi] * y_re[yi] - x_re[xi] * y_im[yi];
         }
 #endif
         out_re[k] = sum_re;
@@ -717,6 +730,7 @@ void mti_filter_f32(float* output, const float* input,
                     std::size_t n_pulses, std::size_t n_range,
                     const float* coeffs, std::size_t n_coeffs) {
 
+    if (n_pulses < n_coeffs) return;
     std::size_t out_pulses = n_pulses - n_coeffs + 1;
 
     for (std::size_t p = 0; p < out_pulses; ++p) {
@@ -763,6 +777,7 @@ Eigen::MatrixXf mti_filter(const Eigen::MatrixXf& input, const Eigen::VectorXf& 
     std::size_t n_pulses = input.rows();
     std::size_t n_range = input.cols();
     std::size_t n_coeffs = coeffs.size();
+    if (n_pulses < n_coeffs) return Eigen::MatrixXf(0, n_range);
     std::size_t out_pulses = n_pulses - n_coeffs + 1;
 
     Eigen::MatrixXf output(out_pulses, n_range);

@@ -5,6 +5,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -48,7 +49,9 @@ static std::vector<char> readFile(const std::string& filename) {
             std::streampos pos = file.tellg();
             if (pos < 0) throw std::runtime_error("Failed to determine file size: " + filename);
             size_t fileSize = static_cast<size_t>(pos);
-            std::vector<char> buffer(fileSize);
+            // Pad to uint32_t alignment for Vulkan SPIR-V requirement
+            size_t paddedSize = (fileSize + 3) & ~size_t(3);
+            std::vector<char> buffer(paddedSize, 0);
             file.seekg(0);
             file.read(buffer.data(), fileSize);
             file.close();
@@ -100,6 +103,10 @@ static void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPr
 // VulkanContext
 // -----------------------------------------------------------------------------
 
+static void vulkanAtexitCleanup() {
+    VulkanContext::get().cleanup();
+}
+
 VulkanContext& VulkanContext::get() {
     static VulkanContext instance;
     return instance;
@@ -107,6 +114,11 @@ VulkanContext& VulkanContext::get() {
 
 bool VulkanContext::init() {
     if (initialized) return true;
+
+    // Clean up any partially-created state from a previous failed init()
+    if (device || instance) {
+        cleanup();
+    }
 
     // 1. Create Instance
     VkApplicationInfo appInfo{};
@@ -211,6 +223,12 @@ bool VulkanContext::init() {
     }
 
     initialized = true;
+
+    // Register atexit handler so cleanup runs before static destructors of
+    // Vulkan layers (e.g. libVkLayer_window_system_integration.so) which
+    // would otherwise crash when their internal maps are already destroyed.
+    std::atexit(vulkanAtexitCleanup);
+
     return true;
 }
 
@@ -219,6 +237,7 @@ static void cleanupPipelineCache(VkDevice device);
 
 void VulkanContext::cleanup() {
     if (device) {
+        vkDeviceWaitIdle(device);
         // Cleanup pipeline cache before destroying device
         cleanupPipelineCache(device);
         vkDestroyCommandPool(device, commandPool, nullptr);
@@ -395,13 +414,17 @@ struct BufferWrapper {
     }
     void mapAndCopyFrom(const void* src) {
         void* data;
-        vkMapMemory(VulkanContext::get().device, memory, 0, size, 0, &data);
+        if (vkMapMemory(VulkanContext::get().device, memory, 0, size, 0, &data) != VK_SUCCESS) {
+            throw std::runtime_error("failed to map buffer memory for write");
+        }
         memcpy(data, src, (size_t)size);
         vkUnmapMemory(VulkanContext::get().device, memory);
     }
     void mapAndCopyTo(void* dst) {
         void* data;
-        vkMapMemory(VulkanContext::get().device, memory, 0, size, 0, &data);
+        if (vkMapMemory(VulkanContext::get().device, memory, 0, size, 0, &data) != VK_SUCCESS) {
+            throw std::runtime_error("failed to map buffer memory for read");
+        }
         memcpy(dst, data, (size_t)size);
         vkUnmapMemory(VulkanContext::get().device, memory);
     }
@@ -1193,6 +1216,8 @@ void vulkan_fft_radix2(Eigen::VectorXf& data, bool inverse) {
 
     // Read back
     buf.mapAndCopyTo(data.data());
+
+    // Note: follows FFTW/cuFFT convention — caller is responsible for 1/N normalization on IFFT
 }
 
 void vulkan_fft_radix4(Eigen::VectorXf& data, bool inverse) {
@@ -1238,6 +1263,8 @@ void vulkan_fft_radix4(Eigen::VectorXf& data, bool inverse) {
     }
 
     buf.mapAndCopyTo(data.data());
+
+    // Note: follows FFTW/cuFFT convention — caller is responsible for 1/N normalization on IFFT
 }
 
 #else
