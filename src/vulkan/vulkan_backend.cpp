@@ -33,6 +33,11 @@ static std::vector<char> readFile(const std::string& filename) {
         paths.push_back(envPath + filename);
     }
 
+    // Compile-time SPV directory (works for FetchContent consumers)
+#ifdef OPTMATH_SPV_BUILD_DIR
+    paths.push_back(std::string(OPTMATH_SPV_BUILD_DIR) + "/" + filename);
+#endif
+
     paths.push_back(filename);
     // Relative path for finding shaders in build tree when running from build root or examples
     paths.push_back("src/" + filename);

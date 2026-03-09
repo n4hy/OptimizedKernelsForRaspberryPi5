@@ -150,6 +150,9 @@ target_link_libraries(OptMathKernels PUBLIC Eigen3::Eigen)
 
 if(ENABLE_VULKAN)
     target_link_libraries(OptMathKernels PRIVATE Vulkan::Vulkan)
+    # Tell vulkan_backend.cpp where compiled SPV shaders live at build time
+    target_compile_definitions(OptMathKernels PRIVATE
+        OPTMATH_SPV_BUILD_DIR="${CMAKE_CURRENT_BINARY_DIR}")
     if(GLSLANG_VALIDATOR)
         add_dependencies(OptMathKernels optmath_shaders)
     endif()
