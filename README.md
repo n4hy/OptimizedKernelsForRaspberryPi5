@@ -45,7 +45,7 @@ While remaining compatible with standard Linux x86/ARM environments.
 
 ### Passive Radar Signal Processing
 
-OptMathKernels powers the [PassiveRadar_Kraken](https://github.com/n4hy/PassiveRadar_Kraken_NvidiaCUDA,git)
+OptMathKernels powers the [PassiveRadar_Kraken](https://github.com/n4hy/PassiveRadar_Kraken)
 project, providing hardware-accelerated kernels for:
 
 **ARM NEON (Raspberry Pi 5):**
@@ -383,7 +383,7 @@ thresholds — and measure on an **idle** machine (see the benchmarking note bel
 | **Shared Memory** | 4KB per workgroup |
 | **Max Workgroup Size** | 256 |
 
-**Vulkan Compute Shaders**: 40 GLSL compute shaders compiled to SPIR-V:
+**Vulkan Compute Shaders**: 35 GLSL compute shaders compiled to SPIR-V:
 - Vector operations (add, sub, mul, div, dot, norm)
 - Matrix operations (add, mul, transpose, scale)
 - Reductions (sum, max, min, prefix scan)
@@ -586,7 +586,7 @@ sudo ldconfig
 ls /usr/local/lib/libOptMathKernels*
 ls /usr/local/include/optmath/
 ls /usr/local/lib/cmake/OptMathKernels/
-ls /usr/local/share/optmathkernels/shaders/   # 39 compiled .spv Vulkan shaders
+ls /usr/local/share/optmathkernels/shaders/   # 35 compiled .spv Vulkan shaders
 ```
 
 #### Verified: Raspberry Pi 5 (v0.5.17)
@@ -1585,7 +1585,7 @@ OptMathKernels/
 │   │   └── platform.cpp            # CPU topology, thread affinity, cache detection
 │   ├── vulkan/
 │   │   ├── vulkan_backend.cpp      # Vulkan context & dispatch (Mali-G720 auto-detect)
-│   │   └── shaders/                # 40 GLSL compute shaders
+│   │   └── shaders/                # 35 GLSL compute shaders
 │   │       ├── vec_add.comp.glsl
 │   │       ├── mat_mul_tiled.comp.glsl
 │   │       ├── mat_mul_tiled_mali.comp.glsl  # 32x32 tiles for Mali-G720
