@@ -390,23 +390,28 @@ __global__ void kernel_steering_vector_ula_f32(float* __restrict__ steer_re,
     }
 }
 
-// Batch steering vectors for multiple angles
+// Batch steering vectors for multiple angles.
+// Grid: one block per angle (blockIdx.x). Threads within a block stride over
+// elements so n_elements is not capped at maxThreadsPerBlock (1024).
 __global__ void kernel_steering_vectors_batch_f32(float* __restrict__ steer_re,
                                                    float* __restrict__ steer_im,
                                                    const float* __restrict__ angles,
                                                    float d_lambda,
                                                    int n_elements,
                                                    int n_angles) {
-    int elem_idx = threadIdx.x;
     int angle_idx = blockIdx.x;
+    if (angle_idx >= n_angles) return;
 
-    if (elem_idx < n_elements && angle_idx < n_angles) {
-        float theta = angles[angle_idx];
-        float phase = -2.0f * PI * d_lambda * elem_idx * sinf(theta);
+    float theta = angles[angle_idx];
+    float sin_theta = sinf(theta);
+    int row_base = angle_idx * n_elements;
+
+    for (int elem_idx = threadIdx.x; elem_idx < n_elements; elem_idx += blockDim.x) {
+        float phase = -2.0f * PI * d_lambda * elem_idx * sin_theta;
         float sin_phase, cos_phase;
         __sincosf(phase, &sin_phase, &cos_phase);
 
-        int out_idx = angle_idx * n_elements + elem_idx;
+        int out_idx = row_base + elem_idx;
         steer_re[out_idx] = cos_phase;
         steer_im[out_idx] = sin_phase;
     }
@@ -643,10 +648,9 @@ Eigen::MatrixXf cuda_caf(const Eigen::VectorXcf& ref,
     if (!CudaContext::get().is_initialized()) CudaContext::get().init();
 
     // Determine FFT size (next power of 2)
-    // For cross-correlation, we need fft_len >= n_samples + n_range_bins - 1
-    // to avoid circular correlation artifacts. Using 2*n_samples ensures
-    // sufficient zero-padding for linear correlation.
-    size_t min_fft_len = n_samples + n_range_bins;  // Fixed: was 2*n_samples (off-by-one)
+    // For linear cross-correlation, we need fft_len >= n_samples + n_range_bins - 1
+    // to avoid circular correlation artifacts.
+    size_t min_fft_len = n_samples + n_range_bins - 1;
     size_t fft_len = 1;
     while (fft_len < min_fft_len) fft_len <<= 1;
 
@@ -797,25 +801,22 @@ Eigen::MatrixXf cuda_caf(const Eigen::VectorXcf& ref,
     float scale = 1.0f / fft_len;
 
     // Process each Doppler bin - ALL OPERATIONS ON GPU
+    // All launches use the default stream, which serializes them; no per-step
+    // cudaDeviceSynchronize is needed inside the loop.
+    int blocks_samples = div_ceil(n_samples, BLOCK_SIZE);
+    int blocks_range = div_ceil(n_range_bins, BLOCK_SIZE);
     for (size_t d = 0; d < n_doppler_bins; ++d) {
         float doppler_freq = doppler_start + d * doppler_step;
 
         // Apply Doppler shift to reference (GPU kernel)
-        int blocks_samples = div_ceil(n_samples, BLOCK_SIZE);
         kernel_doppler_shift_f32<<<blocks_samples, BLOCK_SIZE>>>(
             d_shifted_re, d_shifted_im,
             d_ref_re, d_ref_im,
             doppler_freq, sample_rate, static_cast<int>(n_samples));
 
-        // Synchronize before interleave depends on Doppler shift output
-        cudaDeviceSynchronize();
-
         // Interleave shifted reference on GPU (zero-padded)
         kernel_interleave_complex_f32<<<blocks_fft, BLOCK_SIZE>>>(
             d_fft_ref, d_shifted_re, d_shifted_im, static_cast<int>(n_samples), static_cast<int>(fft_len));
-
-        // Synchronize before FFT depends on interleave output
-        cudaDeviceSynchronize();
 
         // FFT shifted reference
         cufftExecC2C(fft_plan,
@@ -823,15 +824,9 @@ Eigen::MatrixXf cuda_caf(const Eigen::VectorXcf& ref,
                      reinterpret_cast<cufftComplex*>(d_fft_ref),
                      CUFFT_FORWARD);
 
-        // Synchronize before multiply depends on FFT output
-        cudaDeviceSynchronize();
-
         // Multiply: Surv * conj(Ref) on GPU
         kernel_complex_conj_mul_interleaved_f32<<<blocks_fft, BLOCK_SIZE>>>(
             d_fft_prod, d_fft_surv, d_fft_ref, scale, static_cast<int>(fft_len));
-
-        // Synchronize before IFFT depends on multiply output
-        cudaDeviceSynchronize();
 
         // IFFT
         cufftExecC2C(fft_plan,
@@ -839,11 +834,7 @@ Eigen::MatrixXf cuda_caf(const Eigen::VectorXcf& ref,
                      reinterpret_cast<cufftComplex*>(d_fft_prod),
                      CUFFT_INVERSE);
 
-        // Synchronize before magnitude depends on IFFT output
-        cudaDeviceSynchronize();
-
         // Extract magnitude directly to output row on GPU
-        int blocks_range = div_ceil(n_range_bins, BLOCK_SIZE);
         kernel_magnitude_interleaved_f32<<<blocks_range, BLOCK_SIZE>>>(
             d_caf_out + d * n_range_bins, d_fft_prod, static_cast<int>(n_range_bins));
     }
@@ -862,8 +853,24 @@ Eigen::MatrixXf cuda_caf(const Eigen::VectorXcf& ref,
     cleanup();
 
 #else
-    // Fallback: compute on CPU
-    caf_out.setZero();
+    // CPU fallback: direct time-domain CAF.
+    // O(D * R * N) — slow, but semantically matches the GPU path so
+    // no-CUDA builds still produce correct results instead of silent zeros.
+    const std::complex<float> j(0.0f, 1.0f);
+    const float two_pi_over_fs = -2.0f * PI / sample_rate;
+    for (size_t d = 0; d < n_doppler_bins; ++d) {
+        float doppler_freq = doppler_start + d * doppler_step;
+        for (size_t r = 0; r < n_range_bins; ++r) {
+            std::complex<float> acc(0.0f, 0.0f);
+            for (size_t n = 0; n + r < n_samples; ++n) {
+                float phase = two_pi_over_fs * doppler_freq * static_cast<float>(n);
+                std::complex<float> shifted_ref =
+                    ref[n] * std::exp(j * phase);
+                acc += surv[n + r] * std::conj(shifted_ref);
+            }
+            caf_out(d, r) = std::abs(acc);
+        }
+    }
 #endif
 
     return caf_out;
@@ -1116,9 +1123,13 @@ Eigen::VectorXf cuda_bartlett_spectrum(const Eigen::VectorXcf& array_data,
         }
     }
 
-    // Generate steering vectors
-    kernel_steering_vectors_batch_f32<<<n_angles, n_elements>>>(
-        d_steer_re, d_steer_im, d_angles, d_lambda, n_elements, n_angles);
+    // Generate steering vectors. Cap block size at 256 threads; the kernel
+    // grid-strides over elements so n_elements may exceed the block size.
+    {
+        int steer_threads = n_elements < 256 ? n_elements : 256;
+        kernel_steering_vectors_batch_f32<<<n_angles, steer_threads>>>(
+            d_steer_re, d_steer_im, d_angles, d_lambda, n_elements, n_angles);
+    }
 
     // Synchronize before Bartlett spectrum depends on steering vectors
     cudaDeviceSynchronize();
@@ -1203,8 +1214,11 @@ Eigen::MatrixXcf cuda_steering_vectors_ula(int n_elements,
         goto cpu_fallback_steer;
     }
 
-    kernel_steering_vectors_batch_f32<<<n_angles, n_elements>>>(
-        d_steer_re, d_steer_im, d_angles, d_lambda, n_elements, n_angles);
+    {
+        int steer_threads = n_elements < 256 ? n_elements : 256;
+        kernel_steering_vectors_batch_f32<<<n_angles, steer_threads>>>(
+            d_steer_re, d_steer_im, d_angles, d_lambda, n_elements, n_angles);
+    }
 
     // Synchronize before D2H transfer
     cudaDeviceSynchronize();
