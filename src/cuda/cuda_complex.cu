@@ -1112,11 +1112,6 @@ Eigen::VectorXcf cuda_ifft(const Eigen::VectorXcf& x) {
 
     cuda_fft_1d_f32(d_data, n, true);
 
-    // Normalize
-    float scale = 1.0f / static_cast<float>(n);
-    int blocks = div_ceil(n * 2, BLOCK_SIZE);
-    // Would need a scale kernel here
-
     err = cudaMemcpy(result.data(), d_data, n * 2 * sizeof(float), cudaMemcpyDeviceToHost);
     if (err != cudaSuccess) {
         std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;

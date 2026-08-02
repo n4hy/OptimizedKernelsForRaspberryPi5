@@ -93,8 +93,7 @@ if(ENABLE_VULKAN)
             reduce_max.comp.glsl
             reduce_min.comp.glsl
             reduce_complete.comp.glsl
-            # Scan / Prefix sum (single-block; the multi-block scan_local/
-            # scan_block_sums/scan_add_offsets pipeline was never wired up)
+            # Scan / Prefix sum (single-block)
             scan_prefix_sum.comp.glsl
             # FFT
             fft_radix2.comp.glsl
