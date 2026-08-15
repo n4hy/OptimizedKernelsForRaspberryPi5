@@ -353,12 +353,13 @@ Eigen::MatrixXf sve2_caf(const Eigen::VectorXcf& ref,
     Eigen::VectorXf surv_re = surv.real();
     Eigen::VectorXf surv_im = surv.imag();
 
-    Eigen::MatrixXf result(n_doppler_bins, n_range_bins);
-
     std::size_t n_samples = std::min(static_cast<std::size_t>(ref.size()),
                                      static_cast<std::size_t>(surv.size()));
 
-    sve2_caf_f32(result.data(),
+    // sve2_caf_f32 writes Doppler-major / range-minor (row-major). Eigen
+    // MatrixXf is column-major — convert, matching optmath::radar::caf.
+    std::vector<float> rowmajor(n_doppler_bins * n_range_bins, 0.0f);
+    sve2_caf_f32(rowmajor.data(),
                  ref_re.data(), ref_im.data(),
                  surv_re.data(), surv_im.data(),
                  n_samples,
@@ -367,7 +368,11 @@ Eigen::MatrixXf sve2_caf(const Eigen::VectorXcf& ref,
                  sample_rate,
                  n_range_bins);
 
-    return result;
+    Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
+        mapped(rowmajor.data(),
+               static_cast<Eigen::Index>(n_doppler_bins),
+               static_cast<Eigen::Index>(n_range_bins));
+    return Eigen::MatrixXf(mapped);
 }
 
 #else // !OPTMATH_USE_SVE2

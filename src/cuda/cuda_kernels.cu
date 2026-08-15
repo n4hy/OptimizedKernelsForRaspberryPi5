@@ -109,6 +109,7 @@
 #include "optmath/cuda_error.hpp"
 #include <algorithm>
 #include <cmath>
+#include <climits>
 #include <vector>
 
 #ifdef OPTMATH_USE_CUDA
@@ -129,8 +130,11 @@ using namespace optmath::cuda;
 constexpr int BLOCK_SIZE = 256;
 [[maybe_unused]] constexpr int WARP_SIZE = 32;
 
-inline int div_ceil(int a, int b) {
-    return (a + b - 1) / b;
+inline int div_ceil(size_t n, int block) {
+    if (block <= 0) return 0;
+    const size_t b = static_cast<size_t>(block);
+    const size_t q = n / b + ((n % b) != 0);
+    return (q > static_cast<size_t>(INT_MAX)) ? INT_MAX : static_cast<int>(q);
 }
 
 // =============================================================================
@@ -378,6 +382,54 @@ __global__ void kernel_softmax_f32(float* __restrict__ out,
     // Normalize
     if (idx < n) {
         out[idx] = exp_val / sum;
+    }
+}
+
+// Multi-block softmax helpers: the single-block kernel above only covers
+// n <= BLOCK_SIZE. Realistic vectors used to take a serial CPU path plus two
+// PCIe copies. These three kernels keep the O(n) work on the device.
+__global__ void kernel_block_max_f32(const float* __restrict__ in,
+                                     float* __restrict__ block_max,
+                                     size_t n) {
+    extern __shared__ float sdata[];
+    size_t tid = threadIdx.x;
+    float mx = -INFINITY;
+    for (size_t i = blockIdx.x * blockDim.x + tid; i < n; i += static_cast<size_t>(gridDim.x) * blockDim.x) {
+        mx = fmaxf(mx, in[i]);
+    }
+    sdata[tid] = mx;
+    __syncthreads();
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] = fmaxf(sdata[tid], sdata[tid + s]);
+        __syncthreads();
+    }
+    if (tid == 0) block_max[blockIdx.x] = sdata[0];
+}
+
+__global__ void kernel_block_sum_exp_f32(const float* __restrict__ in,
+                                         float* __restrict__ block_sum,
+                                         float max_val, size_t n) {
+    extern __shared__ float sdata[];
+    size_t tid = threadIdx.x;
+    float sum = 0.0f;
+    for (size_t i = blockIdx.x * blockDim.x + tid; i < n; i += static_cast<size_t>(gridDim.x) * blockDim.x) {
+        sum += __expf(in[i] - max_val);
+    }
+    sdata[tid] = sum;
+    __syncthreads();
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) block_sum[blockIdx.x] = sdata[0];
+}
+
+__global__ void kernel_softmax_normalize_f32(float* __restrict__ out,
+                                             const float* __restrict__ in,
+                                             float max_val, float inv_sum, size_t n) {
+    size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        out[i] = __expf(in[i] - max_val) * inv_sum;
     }
 }
 
@@ -1065,10 +1117,17 @@ void cuda_gelu_f32(float* out, const float* in, size_t n) {
 
 void cuda_softmax_f32(float* out, const float* in, size_t n) {
 #ifdef OPTMATH_USE_CUDA
+    if (n == 0) return;
     if (n <= BLOCK_SIZE) {
         kernel_softmax_f32<<<1, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(out, in, n);
-    } else {
-        // CPU fallback for n > BLOCK_SIZE
+        CUDA_KERNEL_CHECK();
+        return;
+    }
+
+    int blocks = div_ceil(n, BLOCK_SIZE);
+    if (blocks > 1024) blocks = 1024;
+    float* d_partial = nullptr;
+    if (cudaMalloc(&d_partial, static_cast<size_t>(blocks) * sizeof(float)) != cudaSuccess) {
         std::vector<float> host_in(n), host_out(n);
         cudaMemcpy(host_in.data(), in, n * sizeof(float), cudaMemcpyDeviceToHost);
         float max_val = *std::max_element(host_in.begin(), host_in.end());
@@ -1079,7 +1138,23 @@ void cuda_softmax_f32(float* out, const float* in, size_t n) {
         }
         for (size_t i = 0; i < n; ++i) host_out[i] /= sum;
         cudaMemcpy(out, host_out.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+        return;
     }
+
+    kernel_block_max_f32<<<blocks, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(in, d_partial, n);
+    std::vector<float> h(static_cast<size_t>(blocks));
+    cudaMemcpy(h.data(), d_partial, h.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    float max_val = h[0];
+    for (int i = 1; i < blocks; ++i) max_val = std::max(max_val, h[i]);
+
+    kernel_block_sum_exp_f32<<<blocks, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(in, d_partial, max_val, n);
+    cudaMemcpy(h.data(), d_partial, h.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    float sum = 0.0f;
+    for (int i = 0; i < blocks; ++i) sum += h[i];
+    const float inv_sum = (sum == 0.0f) ? 0.0f : 1.0f / sum;
+
+    kernel_softmax_normalize_f32<<<div_ceil(n, BLOCK_SIZE), BLOCK_SIZE>>>(out, in, max_val, inv_sum, n);
+    cudaFree(d_partial);
     CUDA_KERNEL_CHECK();
 #endif
 }

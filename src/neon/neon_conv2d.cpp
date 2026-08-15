@@ -33,6 +33,7 @@
 #include <cstring>
 #include <vector>
 #include <algorithm>
+#include <cstdint>
 
 #ifdef OPTMATH_USE_NEON
 #include <arm_neon.h>
@@ -40,6 +41,15 @@
 
 namespace optmath {
 namespace neon {
+
+// Gate OpenMP on total work, not just row count. A 8x4096 image with a 5x5
+// kernel is plenty of work for 4 cores but has only 4 output rows, so the
+// old `out_rows >= 64` test left it on one core.
+static inline bool conv2d_should_parallelize(std::size_t out_rows, std::size_t out_cols,
+                                             std::size_t k_rows = 1, std::size_t k_cols = 1) {
+    const std::uint64_t work = static_cast<std::uint64_t>(out_rows) * out_cols * k_rows * k_cols;
+    return work >= 16384ull;
+}
 
 // =========================================================================
 // General 2D Convolution (valid mode, row-major layout)
@@ -56,7 +66,7 @@ void neon_conv2d_f32(float* out, const float* in,
 #ifdef OPTMATH_USE_NEON
     // Output rows are independent (each writes a disjoint row of out). Split
     // across the 4 A76 cores; skip the fork for tiny images where it wouldn't pay.
-    #pragma omp parallel for schedule(static) if(out_rows >= 64)
+    #pragma omp parallel for schedule(static) if(conv2d_should_parallelize(out_rows, out_cols, kernel_rows, kernel_cols))
     for (std::size_t r = 0; r < out_rows; ++r) {
         std::size_t c = 0;
 
@@ -110,7 +120,7 @@ void neon_conv2d_f32(float* out, const float* in,
         }
     }
 #else
-    #pragma omp parallel for schedule(static) if(out_rows >= 64)
+    #pragma omp parallel for schedule(static) if(conv2d_should_parallelize(out_rows, out_cols, kernel_rows, kernel_cols))
     for (std::size_t r = 0; r < out_rows; ++r) {
         for (std::size_t c = 0; c < out_cols; ++c) {
             float sum = 0.0f;
@@ -144,7 +154,7 @@ void neon_conv2d_separable_f32(float* out, const float* in,
     std::vector<float> mid(mid_rows * mid_cols);
 
     // Pass 1: Row convolution (1D FIR along each row) — rows independent.
-    #pragma omp parallel for schedule(static) if(mid_rows >= 64)
+    #pragma omp parallel for schedule(static) if(conv2d_should_parallelize(mid_rows, mid_cols, 1, row_kernel_len))
     for (std::size_t r = 0; r < mid_rows; ++r) {
         const float* row_in = in + r * in_cols;
         float* row_out = mid.data() + r * mid_cols;
@@ -153,7 +163,7 @@ void neon_conv2d_separable_f32(float* out, const float* in,
 
     // Pass 2: Column convolution on the intermediate result
 #ifdef OPTMATH_USE_NEON
-    #pragma omp parallel for schedule(static) if(out_rows >= 64)
+    #pragma omp parallel for schedule(static) if(conv2d_should_parallelize(out_rows, out_cols, col_kernel_len, 1))
     for (std::size_t r = 0; r < out_rows; ++r) {
         std::size_t c = 0;
 
@@ -180,7 +190,7 @@ void neon_conv2d_separable_f32(float* out, const float* in,
         }
     }
 #else
-    #pragma omp parallel for schedule(static) if(out_rows >= 64)
+    #pragma omp parallel for schedule(static) if(conv2d_should_parallelize(out_rows, out_cols, col_kernel_len, 1))
     for (std::size_t r = 0; r < out_rows; ++r) {
         for (std::size_t c = 0; c < out_cols; ++c) {
             float sum = 0.0f;
@@ -217,7 +227,7 @@ void neon_conv2d_3x3_f32(float* out, const float* in,
     float32x4_t vk21 = vdupq_n_f32(kernel[7]);
     float32x4_t vk22 = vdupq_n_f32(kernel[8]);
 
-    #pragma omp parallel for schedule(static) if(out_rows >= 64)
+    #pragma omp parallel for schedule(static) if(conv2d_should_parallelize(out_rows, out_cols, 3, 3))
     for (std::size_t r = 0; r < out_rows; ++r) {
         const float* r0 = in + r * in_cols;
         const float* r1 = in + (r + 1) * in_cols;
@@ -292,7 +302,7 @@ void neon_conv2d_5x5_f32(float* out, const float* in,
         }
     }
 
-    #pragma omp parallel for schedule(static) if(out_rows >= 64)
+    #pragma omp parallel for schedule(static) if(conv2d_should_parallelize(out_rows, out_cols, 5, 5))
     for (std::size_t r = 0; r < out_rows; ++r) {
         std::size_t c = 0;
 

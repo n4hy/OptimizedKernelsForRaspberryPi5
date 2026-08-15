@@ -432,6 +432,8 @@ void neon_qr_f32(float* A, float* tau, std::size_t m, std::size_t n, std::size_t
 // Extract explicit Q from stored Householder vectors
 void neon_qr_extract_q_f32(float* Q, const float* A, const float* tau,
                              std::size_t m, std::size_t n, std::size_t lda, std::size_t ldq) {
+    if (m == 0) return;
+
     // Initialize Q to identity
     for (std::size_t j = 0; j < m; ++j) {
         for (std::size_t i = 0; i < m; ++i) {
@@ -447,22 +449,48 @@ void neon_qr_extract_q_f32(float* Q, const float* A, const float* tau,
         if (tau[j] == 0.0f) continue;
 
         std::size_t len = m - j;
+        // v[1:] lives in column j of A, rows j+1..m-1 — contiguous in
+        // column-major storage, so the inner products vectorize directly.
+        const float* vtail = A + (j + 1) + j * lda;
 
-        // Build v: v[0] = 1, v[1:] from A[j+1:m-1, j]
         // Apply to Q[j:m-1, j:m-1]: Q := Q * (I - tau * v * v^T)
         // For each column k of Q: Q[:,k] -= tau * (v^T * Q[:,k]) * v
         for (std::size_t k = j; k < m; ++k) {
             float* qk = Q + j + k * ldq;
-            // dot = v^T * Q[:,k]
             float dot = qk[0]; // v[0] = 1
-            for (std::size_t i = 1; i < len; ++i) {
-                dot += A[j + i + j * lda] * qk[i];
+#ifdef OPTMATH_USE_NEON
+            float32x4_t vacc = vdupq_n_f32(0.0f);
+            std::size_t i = 1;
+            for (; i + 3 < len; i += 4) {
+                vacc = vfmaq_f32(vacc, vld1q_f32(vtail + (i - 1)), vld1q_f32(qk + i));
             }
-            // Q[:,k] -= tau * dot * v
-            qk[0] -= tau[j] * dot;
-            for (std::size_t i = 1; i < len; ++i) {
-                qk[i] -= tau[j] * dot * A[j + i + j * lda];
+            dot += vaddvq_f32(vacc);
+            for (; i < len; ++i) {
+                dot += vtail[i - 1] * qk[i];
             }
+#else
+            for (std::size_t i = 1; i < len; ++i) {
+                dot += vtail[i - 1] * qk[i];
+            }
+#endif
+            const float td = tau[j] * dot;
+            qk[0] -= td;
+#ifdef OPTMATH_USE_NEON
+            float32x4_t vtd = vdupq_n_f32(td);
+            std::size_t i2 = 1;
+            for (; i2 + 3 < len; i2 += 4) {
+                float32x4_t vq = vld1q_f32(qk + i2);
+                vq = vfmsq_f32(vq, vtd, vld1q_f32(vtail + (i2 - 1)));
+                vst1q_f32(qk + i2, vq);
+            }
+            for (; i2 < len; ++i2) {
+                qk[i2] -= td * vtail[i2 - 1];
+            }
+#else
+            for (std::size_t i = 1; i < len; ++i) {
+                qk[i] -= td * vtail[i - 1];
+            }
+#endif
         }
     }
 }
@@ -588,6 +616,9 @@ std::pair<Eigen::MatrixXf, Eigen::VectorXi> neon_lu(const Eigen::MatrixXf& A) {
 std::pair<Eigen::MatrixXf, Eigen::MatrixXf> neon_qr(const Eigen::MatrixXf& A) {
     std::size_t m = static_cast<std::size_t>(A.rows());
     std::size_t n = static_cast<std::size_t>(A.cols());
+    if (m == 0) {
+        return {Eigen::MatrixXf(0, 0), Eigen::MatrixXf::Zero(0, static_cast<Eigen::Index>(n))};
+    }
     std::size_t mn = std::min(m, n);
 
     Eigen::MatrixXf QR = A;

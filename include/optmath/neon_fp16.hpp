@@ -28,9 +28,9 @@ namespace neon {
     /// data[i] = max(0, data[i]) in place, half precision (ReLU).
     void neon_relu_f16(__fp16* data, std::size_t n);
 
-    /// Dot product of two fp16 vectors. Products are formed in fp16 but
-    /// accumulated in fp32, so the result is accurate to ~fp16 input precision
-    /// without fp16 accumulation drift over long vectors. Returns a float.
+    /// Dot product of two fp16 vectors. Each operand is widened to fp32
+    /// before the multiply so a product outside the fp16 finite range cannot
+    /// saturate to Inf. Accumulation is fp32. Returns a float.
     float neon_dot_f16(const __fp16* a, const __fp16* b, std::size_t n);
 
     // NOTE: fp16 GEMM/GEMV were prototyped here and removed. The Cortex-A76 has

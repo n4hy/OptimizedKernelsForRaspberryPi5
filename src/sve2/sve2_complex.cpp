@@ -15,7 +15,9 @@
  * Complex Arithmetic (Interleaved Format, FCMA Accelerated):
  *   sve2_complex_mul_interleaved_f32 uses svcmla_f32_z with rotations 0 and
  *   90 for 2-instruction complex multiply (vs 4 instructions without FCMA).
- *   sve2_complex_conj_mul_interleaved_f32 uses rotations 0 and 270. Non-FCMA
+ *   sve2_complex_conj_mul_interleaved_f32 uses rotations 0 and 270 with
+ *   operands swapped (op1=b, op2=a) so the result is a*conj(b), not conj(a)*b.
+ *   Non-FCMA
  *   fallback uses svtbl_f32 with even/odd index extraction (svindex_u32,
  *   svlsl_n_u32_z, svadd_n_u32_z) for manual deinterleaving.
  *
@@ -200,10 +202,13 @@ void sve2_complex_conj_mul_interleaved_f32(float* out, const float* a,
         svfloat32_t vb = svld1_f32(pg, b + i);
 
 #ifdef OPTMATH_USE_FCMA
-        // FCMA conjugate multiply: rotations 0 and 270
+        // a * conj(b). FCMLA rotations 0+270 on (op1=a, op2=b) compute
+        // conj(a)*b (imaginary part sign-flipped vs a*conj(b)). Swapping
+        // the operands yields dest += conj(b)*a = a*conj(b), matching the
+        // non-FCMA path and the function contract.
         svfloat32_t acc = svdup_f32(0.0f);
-        acc = svcmla_f32_z(pg, acc, va, vb, 0);    // real contribution
-        acc = svcmla_f32_z(pg, acc, va, vb, 270);  // conjugate imag contribution
+        acc = svcmla_f32_z(pg, acc, vb, va, 0);
+        acc = svcmla_f32_z(pg, acc, vb, va, 270);
 #else
         // Manual deinterleave and conjugate multiply without FCMA
         // Use svtbl to correctly extract even/odd elements

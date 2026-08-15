@@ -476,12 +476,15 @@ Eigen::MatrixXf caf(const Eigen::VectorXcf& ref,
     Eigen::VectorXf surv_re = surv.real();
     Eigen::VectorXf surv_im = surv.imag();
 
-    Eigen::MatrixXf result(n_doppler_bins, n_range_bins);
-
     std::size_t n_samples = std::min(static_cast<std::size_t>(ref.size()),
                                      static_cast<std::size_t>(surv.size()));
 
-    caf_f32(result.data(),
+    // caf_f32 writes Doppler-major / range-minor (row-major). Eigen::MatrixXf
+    // is column-major, so writing straight into result.data() scrambles any
+    // non-square map. Stage through a row-major buffer and convert — the same
+    // pattern cfar_2d already uses.
+    std::vector<float> rowmajor(n_doppler_bins * n_range_bins, 0.0f);
+    caf_f32(rowmajor.data(),
             ref_re.data(), ref_im.data(),
             surv_re.data(), surv_im.data(),
             n_samples,
@@ -490,7 +493,11 @@ Eigen::MatrixXf caf(const Eigen::VectorXcf& ref,
             sample_rate,
             n_range_bins);
 
-    return result;
+    Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
+        mapped(rowmajor.data(),
+               static_cast<Eigen::Index>(n_doppler_bins),
+               static_cast<Eigen::Index>(n_range_bins));
+    return Eigen::MatrixXf(mapped);
 }
 
 // NOTE: A half-precision CAF (caf_f16) was implemented and benchmarked but
@@ -747,7 +754,12 @@ void nlms_filter_f32(float* output, float* weights,
 
     if (filter_length == 0 || n == 0) return;
 
-    for (std::size_t i = filter_length - 1; i < n; ++i) {
+    // The adaptive loop needs `filter_length` history samples. When the
+    // filter is longer than the buffer, there is no valid tap window: pass
+    // the input through and do not write past `n`.
+    const std::size_t warmup = (filter_length > n) ? n : (filter_length - 1);
+
+    for (std::size_t i = warmup; i < n; ++i) {
         // Compute filter output (estimate of clutter)
         float y = 0.0f;
         float power = eps;
@@ -770,7 +782,7 @@ void nlms_filter_f32(float* output, float* weights,
     }
 
     // Fill initial samples where filter can't operate
-    for (std::size_t i = 0; i < filter_length - 1; ++i) {
+    for (std::size_t i = 0; i < warmup; ++i) {
         output[i] = input[i]; // Pass through
     }
 }

@@ -103,6 +103,9 @@
 #include "optmath/cuda_backend.hpp"
 #include "optmath/cuda_error.hpp"
 #include <cmath>
+#include <climits>
+#include <algorithm>
+#include <limits>
 
 #ifdef OPTMATH_USE_CUDA
 #include <cuda_runtime.h>
@@ -113,8 +116,11 @@ constexpr int BLOCK_SIZE = 256;
 constexpr int BLOCK_2D = 16;
 constexpr float PI = 3.14159265358979323846f;
 
-inline int div_ceil(int a, int b) {
-    return (a + b - 1) / b;
+inline int div_ceil(size_t n, int block) {
+    if (block <= 0) return 0;
+    const size_t b = static_cast<size_t>(block);
+    const size_t q = n / b + ((n % b) != 0);
+    return (q > static_cast<size_t>(INT_MAX)) ? INT_MAX : static_cast<int>(q);
 }
 
 // =============================================================================
@@ -572,10 +578,18 @@ Eigen::VectorXf cuda_generate_window(size_t n, WindowType type, float param) {
             case WindowType::BLACKMAN_HARRIS:
                 kernel_generate_blackman_harris_f32<<<blocks, BLOCK_SIZE>>>(d_window, static_cast<int>(n));
                 break;
+            case WindowType::KAISER:
+            case WindowType::GAUSSIAN:
+            case WindowType::TUKEY:
+                // No GPU kernel: generate on the CPU so param is honoured
+                // instead of silently substituting Hamming.
+                cudaFree(d_window);
+                d_window = nullptr;
+                goto cpu_fallback;
             default:
-                // Default to Hamming
-                kernel_generate_hamming_f32<<<blocks, BLOCK_SIZE>>>(d_window, static_cast<int>(n));
-                break;
+                cudaFree(d_window);
+                d_window = nullptr;
+                goto cpu_fallback;
         }
 
         // Synchronize before D2H transfer
@@ -594,8 +608,18 @@ Eigen::VectorXf cuda_generate_window(size_t n, WindowType type, float param) {
 
 cpu_fallback:
 #endif
-    // Fallback: generate on CPU
+    // Fallback: generate on CPU (also the path for KAISER / GAUSSIAN / TUKEY)
     float divisor = (n > 1) ? static_cast<float>(n - 1) : 1.0f;
+    auto bessel_i0 = [](float x) -> float {
+        float sum = 1.0f;
+        float term = 1.0f;
+        for (int k = 1; k < 20; ++k) {
+            term *= (x / (2.0f * k)) * (x / (2.0f * k));
+            sum += term;
+            if (term < 1e-10f * sum) break;
+        }
+        return sum;
+    };
     for (size_t i = 0; i < n; ++i) {
         switch (type) {
             case WindowType::RECTANGULAR:
@@ -611,6 +635,46 @@ cpu_fallback:
                 window[i] = 0.42f - 0.5f * std::cos(2.0f * PI * i / divisor)
                           + 0.08f * std::cos(4.0f * PI * i / divisor);
                 break;
+            case WindowType::BLACKMAN_HARRIS: {
+                float x = 2.0f * PI * i / divisor;
+                window[i] = 0.35875f - 0.48829f * std::cos(x)
+                          + 0.14128f * std::cos(2.0f * x)
+                          - 0.01168f * std::cos(3.0f * x);
+                break;
+            }
+            case WindowType::KAISER: {
+                float beta = param;
+                float i0_beta = bessel_i0(beta);
+                float half_n = divisor / 2.0f;
+                if (half_n <= 0.0f) { window[i] = 1.0f; break; }
+                float t = (static_cast<float>(i) - half_n) / half_n;
+                float arg = beta * std::sqrt(std::max(0.0f, 1.0f - t * t));
+                window[i] = bessel_i0(arg) / i0_beta;
+                break;
+            }
+            case WindowType::GAUSSIAN: {
+                float sigma = (param > 0.0f) ? param : 0.4f;
+                float half_n = divisor / 2.0f;
+                if (half_n <= 0.0f) { window[i] = 1.0f; break; }
+                float x = (static_cast<float>(i) - half_n) / (sigma * half_n);
+                window[i] = std::exp(-0.5f * x * x);
+                break;
+            }
+            case WindowType::TUKEY: {
+                float alpha = param;
+                if (alpha < 0.0f) alpha = 0.0f;
+                if (alpha > 1.0f) alpha = 1.0f;
+                if (n <= 1 || alpha == 0.0f) { window[i] = 1.0f; break; }
+                float x = static_cast<float>(i) / divisor;
+                if (x < alpha / 2.0f) {
+                    window[i] = 0.5f * (1.0f + std::cos(PI * (2.0f * x / alpha - 1.0f)));
+                } else if (x > 1.0f - alpha / 2.0f) {
+                    window[i] = 0.5f * (1.0f + std::cos(PI * (2.0f * x / alpha - 2.0f / alpha + 1.0f)));
+                } else {
+                    window[i] = 1.0f;
+                }
+                break;
+            }
             default:
                 window[i] = 0.54f - 0.46f * std::cos(2.0f * PI * i / divisor);
                 break;
@@ -650,9 +714,18 @@ Eigen::MatrixXf cuda_caf(const Eigen::VectorXcf& ref,
     // Determine FFT size (next power of 2)
     // For linear cross-correlation, we need fft_len >= n_samples + n_range_bins - 1
     // to avoid circular correlation artifacts.
-    size_t min_fft_len = n_samples + n_range_bins - 1;
+    size_t min_fft_len = n_samples;
+    if (n_range_bins > 0 && n_samples > std::numeric_limits<size_t>::max() - (n_range_bins - 1)) {
+        return caf_out;
+    }
+    min_fft_len = n_samples + n_range_bins - 1;
     size_t fft_len = 1;
-    while (fft_len < min_fft_len) fft_len <<= 1;
+    while (fft_len < min_fft_len) {
+        if (fft_len > (std::numeric_limits<size_t>::max() >> 1)) {
+            return caf_out;
+        }
+        fft_len <<= 1;
+    }
 
     // Allocate device memory with error checking
     float *d_ref_re = nullptr, *d_ref_im = nullptr;
@@ -842,10 +915,18 @@ Eigen::MatrixXf cuda_caf(const Eigen::VectorXcf& ref,
     // Final synchronize before D2H transfer
     cudaDeviceSynchronize();
 
-    // Single D2H transfer at the end
-    err = cudaMemcpy(caf_out.data(), d_caf_out, n_doppler_bins * n_range_bins * sizeof(float), cudaMemcpyDeviceToHost);
+    // Device buffer is Doppler-major / range-minor (row-major). Eigen::MatrixXf
+    // is column-major — convert so caf_out(d, r) is the bin written for (d, r).
+    std::vector<float> rowmajor(n_doppler_bins * n_range_bins);
+    err = cudaMemcpy(rowmajor.data(), d_caf_out, rowmajor.size() * sizeof(float), cudaMemcpyDeviceToHost);
     if (err != cudaSuccess) {
         std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+    } else {
+        Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
+            mapped(rowmajor.data(),
+                   static_cast<Eigen::Index>(n_doppler_bins),
+                   static_cast<Eigen::Index>(n_range_bins));
+        caf_out = mapped;
     }
 
     // Cleanup

@@ -481,3 +481,13 @@ TEST_F(NeonLinalgTest, EigenInverseWrapper) {
     Eigen::MatrixXf diff = I - Eigen::MatrixXf::Identity(n, n);
     EXPECT_LT(diff.norm(), 1e-3);
 }
+
+TEST(NeonLinalgStandalone, QREmptyDoesNotUnderflow) {
+    // m==0 made `std::min(j, m - 1)` wrap to SIZE_MAX and index out of bounds.
+    Eigen::MatrixXf A(0, 3);
+    auto [Q, R] = neon_qr(A);
+    EXPECT_EQ(Q.rows(), 0);
+    EXPECT_EQ(Q.cols(), 0);
+    EXPECT_EQ(R.rows(), 0);
+    EXPECT_EQ(R.cols(), 3);
+}

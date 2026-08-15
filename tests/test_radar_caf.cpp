@@ -3,6 +3,7 @@
 #include <Eigen/Dense>
 #include <cmath>
 #include <complex>
+#include <vector>
 
 using namespace optmath::radar;
 
@@ -102,9 +103,10 @@ TEST(RadarCAFTest, ComplexCrossCorrelation) {
 }
 
 TEST(RadarCAFTest, CAFWithSimulatedTarget) {
-    // Simulate a target at known range and Doppler
-    // Note: CAF computes correlation between reference and surveillance
-    // The peak should appear at the range/Doppler of the target
+    // Simulate a target at known range and Doppler.
+    // A CW tone is range-ambiguous (period = fs/f_c), so the discrete CAF
+    // max is not at the true delay — the previous column-major wrapper
+    // scramble hid that. Use a broadband reference so the peak is unique.
 
     size_t n_samples = 2048;
     float sample_rate = 1e6f;  // 1 MHz
@@ -113,29 +115,17 @@ TEST(RadarCAFTest, CAFWithSimulatedTarget) {
 
     const float two_pi = 6.28318530717958647693f;
 
-    // Create reference signal (simple tone)
-    Eigen::VectorXcf ref(n_samples);
-    float carrier_freq = 10000.0f;
-    for (size_t i = 0; i < n_samples; ++i) {
-        float t = static_cast<float>(i) / sample_rate;
-        float phase = two_pi * carrier_freq * t;
-        ref(i) = std::complex<float>(std::cos(phase), std::sin(phase));
-    }
+    Eigen::VectorXcf ref = Eigen::VectorXcf::Random(n_samples);
 
-    // Create surveillance signal (delayed and Doppler-shifted reference)
-    Eigen::VectorXcf surv(n_samples);
+    // Surveillance = delayed reference, Doppler-shifted at the receive time
+    Eigen::VectorXcf surv = Eigen::VectorXcf::Zero(n_samples);
     for (size_t i = 0; i < n_samples; ++i) {
-        float t = static_cast<float>(i) / sample_rate;
-        // Doppler shift
-        float doppler_phase = two_pi * target_doppler * t;
-        std::complex<float> doppler_shift(std::cos(doppler_phase), std::sin(doppler_phase));
-
-        // Delayed reference
         int delay_idx = static_cast<int>(i) - static_cast<int>(target_delay_samples);
         if (delay_idx >= 0 && delay_idx < static_cast<int>(n_samples)) {
-            surv(i) = ref(delay_idx) * doppler_shift;
-        } else {
-            surv(i) = std::complex<float>(0, 0);
+            float t = static_cast<float>(i) / sample_rate;
+            float doppler_phase = two_pi * target_doppler * t;
+            surv(i) = ref(delay_idx) * std::complex<float>(std::cos(doppler_phase),
+                                                          std::sin(doppler_phase));
         }
     }
 
@@ -235,6 +225,36 @@ TEST(RadarCAFTest, CAFZeroDoppler) {
     Eigen::Index max_col;
     caf_mag.row(0).maxCoeff(&max_col);
     EXPECT_NEAR(static_cast<float>(max_col), delay, 2);
+}
+
+TEST(RadarCAFTest, EigenWrapperPreservesRowMajorLayout) {
+    // Non-square map: writing row-major into Eigen::MatrixXf::data() would
+    // scramble (d, r) so that wrapper(d, r) != raw[d * n_range + r].
+    const std::size_t n_samples = 32;
+    const std::size_t n_doppler = 5;
+    const std::size_t n_range = 9;
+    Eigen::VectorXcf ref = Eigen::VectorXcf::Random(n_samples);
+    Eigen::VectorXcf surv = Eigen::VectorXcf::Random(n_samples);
+
+    Eigen::VectorXf ref_re = ref.real();
+    Eigen::VectorXf ref_im = ref.imag();
+    Eigen::VectorXf surv_re = surv.real();
+    Eigen::VectorXf surv_im = surv.imag();
+
+    std::vector<float> raw(n_doppler * n_range, 0.0f);
+    caf_f32(raw.data(), ref_re.data(), ref_im.data(), surv_re.data(), surv_im.data(),
+            n_samples, n_doppler, -20.0f, 10.0f, 1e6f, n_range);
+
+    Eigen::MatrixXf wrapped = caf(ref, surv, n_doppler, -20.0f, 10.0f, 1e6f, n_range);
+    ASSERT_EQ(wrapped.rows(), static_cast<Eigen::Index>(n_doppler));
+    ASSERT_EQ(wrapped.cols(), static_cast<Eigen::Index>(n_range));
+    for (std::size_t d = 0; d < n_doppler; ++d) {
+        for (std::size_t r = 0; r < n_range; ++r) {
+            EXPECT_FLOAT_EQ(wrapped(static_cast<Eigen::Index>(d), static_cast<Eigen::Index>(r)),
+                            raw[d * n_range + r])
+                << "layout mismatch at (" << d << "," << r << ")";
+        }
+    }
 }
 
 // FFT-based doppler_fft_f32: verify the power-of-2 FFT path matches a direct

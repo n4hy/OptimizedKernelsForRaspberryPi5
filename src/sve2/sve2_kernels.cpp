@@ -50,6 +50,7 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <cstdint>
 #include <vector>
 
 #ifdef OPTMATH_USE_SVE2
@@ -138,23 +139,16 @@ void sve2_mul_f32(float* out, const float* a, const float* b, std::size_t n) {
 
 void sve2_div_f32(float* out, const float* a, const float* b, std::size_t n) {
 #ifdef OPTMATH_USE_SVE2
-    const float epsilon = 1e-10f;
-    svfloat32_t veps = svdup_f32(epsilon);
-    svfloat32_t vzero = svdup_f32(0.0f);
-
+    // IEEE-exact elementwise division, matching neon_div_f32. The previous
+    // path injected a sign-preserving 1e-10 into every denominator, so the
+    // same exported function disagreed with the non-SVE2 (NEON) fallback.
     uint64_t i = 0;
     svbool_t pg = svwhilelt_b32(i, (uint64_t)n);
 
     do {
         svfloat32_t va = svld1_f32(pg, a + i);
         svfloat32_t vb = svld1_f32(pg, b + i);
-
-        // Sign-preserving epsilon: add epsilon if non-negative, subtract if negative
-        svbool_t neg_mask = svcmplt_f32(pg, vb, vzero);
-        svfloat32_t eps_signed = svneg_f32_m(veps, neg_mask, veps);
-        svfloat32_t vb_safe = svadd_f32_z(pg, vb, eps_signed);
-
-        svst1_f32(pg, out + i, svdiv_f32_z(pg, va, vb_safe));
+        svst1_f32(pg, out + i, svdiv_f32_z(pg, va, vb));
         i += svcntw();
         pg = svwhilelt_b32(i, (uint64_t)n);
     } while (svptest_any(svptrue_b32(), pg));
@@ -642,46 +636,50 @@ static void micro_kernel_8x8_sve2(
     svfloat32_t c6_lo = svdup_f32(0.0f), c6_hi = svdup_f32(0.0f);
     svfloat32_t c7_lo = svdup_f32(0.0f), c7_hi = svdup_f32(0.0f);
 
-    svbool_t pt = svptrue_b32();
+    // The 8-row tile is stored as two 4-float chunks. Predicate the loads,
+    // FMAs and stores to 4 lanes so this is correct for any SVE VL
+    // (svcntw() >= 4). An all-true predicate would over-read / over-write
+    // on VL > 128 bits (the previous hard-coded +4 offset assumed svcntw()==4).
+    svbool_t pg4 = svwhilelt_b32(static_cast<uint32_t>(0), static_cast<uint32_t>(4));
 
     for (size_t p = 0; p < k; ++p) {
         // Prefetch next iteration's A and B panels into L1 data cache
         if (p + 1 < k) {
-            svprfb(pt, A_packed + (p + 1) * MR, SV_PLDL1KEEP);
-            svprfb(pt, B_packed + (p + 1) * NR, SV_PLDL1KEEP);
+            svprfb(pg4, A_packed + (p + 1) * MR, SV_PLDL1KEEP);
+            svprfb(pg4, B_packed + (p + 1) * NR, SV_PLDL1KEEP);
         }
 
         // Load A column panel (8 floats = rows 0-7 at k-index p)
-        svfloat32_t a_lo = svld1_f32(pt, A_packed + p * MR);      // rows 0-3
-        svfloat32_t a_hi = svld1_f32(pt, A_packed + p * MR + 4);  // rows 4-7
+        svfloat32_t a_lo = svld1_f32(pg4, A_packed + p * MR);      // rows 0-3
+        svfloat32_t a_hi = svld1_f32(pg4, A_packed + p * MR + 4);  // rows 4-7
 
         // Load B row panel (8 floats = cols 0-7 at k-index p)
         // We need individual b[j] values for rank-1 broadcast
         const float* bp = B_packed + p * NR;
 
         // Rank-1 update: C[:,j] += A[:,p] * B[p,j] for j=0..7
-        c0_lo = svmla_n_f32_z(pt, c0_lo, a_lo, bp[0]);
-        c0_hi = svmla_n_f32_z(pt, c0_hi, a_hi, bp[0]);
-        c1_lo = svmla_n_f32_z(pt, c1_lo, a_lo, bp[1]);
-        c1_hi = svmla_n_f32_z(pt, c1_hi, a_hi, bp[1]);
-        c2_lo = svmla_n_f32_z(pt, c2_lo, a_lo, bp[2]);
-        c2_hi = svmla_n_f32_z(pt, c2_hi, a_hi, bp[2]);
-        c3_lo = svmla_n_f32_z(pt, c3_lo, a_lo, bp[3]);
-        c3_hi = svmla_n_f32_z(pt, c3_hi, a_hi, bp[3]);
-        c4_lo = svmla_n_f32_z(pt, c4_lo, a_lo, bp[4]);
-        c4_hi = svmla_n_f32_z(pt, c4_hi, a_hi, bp[4]);
-        c5_lo = svmla_n_f32_z(pt, c5_lo, a_lo, bp[5]);
-        c5_hi = svmla_n_f32_z(pt, c5_hi, a_hi, bp[5]);
-        c6_lo = svmla_n_f32_z(pt, c6_lo, a_lo, bp[6]);
-        c6_hi = svmla_n_f32_z(pt, c6_hi, a_hi, bp[6]);
-        c7_lo = svmla_n_f32_z(pt, c7_lo, a_lo, bp[7]);
-        c7_hi = svmla_n_f32_z(pt, c7_hi, a_hi, bp[7]);
+        c0_lo = svmla_n_f32_z(pg4, c0_lo, a_lo, bp[0]);
+        c0_hi = svmla_n_f32_z(pg4, c0_hi, a_hi, bp[0]);
+        c1_lo = svmla_n_f32_z(pg4, c1_lo, a_lo, bp[1]);
+        c1_hi = svmla_n_f32_z(pg4, c1_hi, a_hi, bp[1]);
+        c2_lo = svmla_n_f32_z(pg4, c2_lo, a_lo, bp[2]);
+        c2_hi = svmla_n_f32_z(pg4, c2_hi, a_hi, bp[2]);
+        c3_lo = svmla_n_f32_z(pg4, c3_lo, a_lo, bp[3]);
+        c3_hi = svmla_n_f32_z(pg4, c3_hi, a_hi, bp[3]);
+        c4_lo = svmla_n_f32_z(pg4, c4_lo, a_lo, bp[4]);
+        c4_hi = svmla_n_f32_z(pg4, c4_hi, a_hi, bp[4]);
+        c5_lo = svmla_n_f32_z(pg4, c5_lo, a_lo, bp[5]);
+        c5_hi = svmla_n_f32_z(pg4, c5_hi, a_hi, bp[5]);
+        c6_lo = svmla_n_f32_z(pg4, c6_lo, a_lo, bp[6]);
+        c6_hi = svmla_n_f32_z(pg4, c6_hi, a_hi, bp[6]);
+        c7_lo = svmla_n_f32_z(pg4, c7_lo, a_lo, bp[7]);
+        c7_hi = svmla_n_f32_z(pg4, c7_hi, a_hi, bp[7]);
     }
 
     // Store: load existing C, add accumulators, store back (column-major)
     #define SVE2_STORE_COL(j, lo, hi) \
-        svst1_f32(pt, C + (j)*ldc,     svadd_f32_z(pt, svld1_f32(pt, C + (j)*ldc),     lo)); \
-        svst1_f32(pt, C + (j)*ldc + 4, svadd_f32_z(pt, svld1_f32(pt, C + (j)*ldc + 4), hi));
+        svst1_f32(pg4, C + (j)*ldc,     svadd_f32_z(pg4, svld1_f32(pg4, C + (j)*ldc),     lo)); \
+        svst1_f32(pg4, C + (j)*ldc + 4, svadd_f32_z(pg4, svld1_f32(pg4, C + (j)*ldc + 4), hi));
 
     SVE2_STORE_COL(0, c0_lo, c0_hi);
     SVE2_STORE_COL(1, c1_lo, c1_hi);
@@ -823,31 +821,43 @@ void sve2_gemm_i8mm(
         for (size_t i = 0; i < M; i += 2) {
             size_t mr = std::min((size_t)2, M - i);
 
-            // Accumulate int32 results
+            // Accumulate int32 results of raw A*B, plus K-sums for zp correction
             int32_t acc[2][2] = {{0, 0}, {0, 0}};
+            int32_t sum_a[2] = {0, 0};
+            int32_t sum_b[2] = {0, 0};
 
             // Process K dimension in chunks of 8 (I8MM granularity)
             for (size_t p = 0; p < K; p += 8) {
                 size_t kk = std::min((size_t)8, K - p);
 
-                // Pack 2 rows of A (8 elements each) into a 16-byte buffer
+                // Pack raw int8 tiles. Zero-point subtraction is applied in
+                // int32 after the I8MM product — subtracting in int8_t wraps
+                // (e.g. 100 - (-50) = 150) and disagrees with the scalar
+                // fallback, which promotes first.
                 int8_t a_pack[16];
                 std::memset(a_pack, 0, sizeof(a_pack));
                 for (size_t ki = 0; ki < kk; ++ki) {
-                    if (i < M)
-                        a_pack[ki] = A[i + (p + ki) * lda] - (int8_t)zero_a;
-                    if (i + 1 < M)
-                        a_pack[8 + ki] = A[(i + 1) + (p + ki) * lda] - (int8_t)zero_a;
+                    if (i < M) {
+                        a_pack[ki] = A[i + (p + ki) * lda];
+                        sum_a[0] += static_cast<int32_t>(a_pack[ki]);
+                    }
+                    if (i + 1 < M) {
+                        a_pack[8 + ki] = A[(i + 1) + (p + ki) * lda];
+                        sum_a[1] += static_cast<int32_t>(a_pack[8 + ki]);
+                    }
                 }
 
-                // Pack 2 columns of B (8 elements each) into a 16-byte buffer
                 int8_t b_pack[16];
                 std::memset(b_pack, 0, sizeof(b_pack));
                 for (size_t ki = 0; ki < kk; ++ki) {
-                    if (j < N)
-                        b_pack[ki] = B[(p + ki) + j * ldb] - (int8_t)zero_b;
-                    if (j + 1 < N)
-                        b_pack[8 + ki] = B[(p + ki) + (j + 1) * ldb] - (int8_t)zero_b;
+                    if (j < N) {
+                        b_pack[ki] = B[(p + ki) + j * ldb];
+                        sum_b[0] += static_cast<int32_t>(b_pack[ki]);
+                    }
+                    if (j + 1 < N) {
+                        b_pack[8 + ki] = B[(p + ki) + (j + 1) * ldb];
+                        sum_b[1] += static_cast<int32_t>(b_pack[8 + ki]);
+                    }
                 }
 
                 // Use SVE2 I8MM: svmmla_s32 computes 2x2 += 2x8 * 8x2
@@ -870,10 +880,14 @@ void sve2_gemm_i8mm(
                 acc[1][1] += result_buf[3];
             }
 
-            // Dequantize and store
+            // (a-za)(b-zb) = ab - za*b - zb*a + za*zb, all in int32/int64
             for (size_t jj = 0; jj < nr; ++jj) {
                 for (size_t ii = 0; ii < mr; ++ii) {
-                    C[(i + ii) + (j + jj) * ldc] = (float)acc[ii][jj] * combined_scale;
+                    int64_t corr = static_cast<int64_t>(acc[ii][jj])
+                                 - static_cast<int64_t>(zero_a) * sum_b[jj]
+                                 - static_cast<int64_t>(zero_b) * sum_a[ii]
+                                 + static_cast<int64_t>(K) * zero_a * zero_b;
+                    C[(i + ii) + (j + jj) * ldc] = static_cast<float>(corr) * combined_scale;
                 }
             }
         }

@@ -99,11 +99,15 @@ static inline Eigen::VectorXf compute_phase_fallback(const Eigen::VectorXcf& a) 
 #include <cuda_runtime.h>
 #include <cufft.h>
 #include <cuComplex.h>
+#include <climits>
 
 constexpr int BLOCK_SIZE = 256;
 
-inline int div_ceil(int a, int b) {
-    return (a + b - 1) / b;
+inline int div_ceil(size_t n, int block) {
+    if (block <= 0) return 0;
+    const size_t b = static_cast<size_t>(block);
+    const size_t q = n / b + ((n % b) != 0);
+    return (q > static_cast<size_t>(INT_MAX)) ? INT_MAX : static_cast<int>(q);
 }
 
 // =============================================================================
@@ -1277,32 +1281,42 @@ Eigen::MatrixXf cuda_conv2d(const Eigen::MatrixXf& image, const Eigen::MatrixXf&
     };
 
     cudaError_t err;
-    err = cudaMalloc(&d_image, img_h * img_w * sizeof(float));
+    // kernel_conv2d_f32 indexes row-major. Eigen::MatrixXf is column-major, so
+    // copy through RowMajor temporaries (same contract as neon_conv2d).
+    Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> image_rm = image;
+    Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> kernel_rm = kernel;
+    Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> result_rm(out_h, out_w);
+
+    const size_t img_bytes = static_cast<size_t>(img_h) * static_cast<size_t>(img_w) * sizeof(float);
+    const size_t kern_bytes = static_cast<size_t>(kern_h) * static_cast<size_t>(kern_w) * sizeof(float);
+    const size_t out_bytes = static_cast<size_t>(out_h) * static_cast<size_t>(out_w) * sizeof(float);
+
+    err = cudaMalloc(&d_image, img_bytes);
     if (err != cudaSuccess) {
         std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
         cleanup();
         return cpu_conv2d();
     }
-    err = cudaMalloc(&d_kernel, kern_h * kern_w * sizeof(float));
+    err = cudaMalloc(&d_kernel, kern_bytes);
     if (err != cudaSuccess) {
         std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
         cleanup();
         return cpu_conv2d();
     }
-    err = cudaMalloc(&d_out, out_h * out_w * sizeof(float));
+    err = cudaMalloc(&d_out, out_bytes);
     if (err != cudaSuccess) {
         std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
         cleanup();
         return cpu_conv2d();
     }
 
-    err = cudaMemcpy(d_image, image.data(), img_h * img_w * sizeof(float), cudaMemcpyHostToDevice);
+    err = cudaMemcpy(d_image, image_rm.data(), img_bytes, cudaMemcpyHostToDevice);
     if (err != cudaSuccess) {
         std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
         cleanup();
         return cpu_conv2d();
     }
-    err = cudaMemcpy(d_kernel, kernel.data(), kern_h * kern_w * sizeof(float), cudaMemcpyHostToDevice);
+    err = cudaMemcpy(d_kernel, kernel_rm.data(), kern_bytes, cudaMemcpyHostToDevice);
     if (err != cudaSuccess) {
         std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
         cleanup();
@@ -1311,7 +1325,7 @@ Eigen::MatrixXf cuda_conv2d(const Eigen::MatrixXf& image, const Eigen::MatrixXf&
 
     cuda_conv2d_f32(d_out, d_image, d_kernel, img_h, img_w, kern_h, kern_w);
 
-    err = cudaMemcpy(result.data(), d_out, out_h * out_w * sizeof(float), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(result_rm.data(), d_out, out_bytes, cudaMemcpyDeviceToHost);
     if (err != cudaSuccess) {
         std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
         cleanup();
@@ -1319,11 +1333,10 @@ Eigen::MatrixXf cuda_conv2d(const Eigen::MatrixXf& image, const Eigen::MatrixXf&
     }
 
     cleanup();
+    return result_rm;
 #else
     return cpu_conv2d();
 #endif
-
-    return result;
 }
 
 } // namespace cuda

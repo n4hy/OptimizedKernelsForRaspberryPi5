@@ -190,6 +190,18 @@ TEST(RadarCFARTest, NLMSFilter) {
     EXPECT_GT(target_region_max, 2.0f * background_mean);
 }
 
+TEST(RadarCFARTest, NLMSFilterLongerThanSignalDoesNotOverflow) {
+    // filter_length > n used to write filter_length-1 samples into an
+    // n-element output (and read past the input). Must pass through.
+    Eigen::VectorXf input = Eigen::VectorXf::Random(8);
+    Eigen::VectorXf reference = Eigen::VectorXf::Random(8);
+    Eigen::VectorXf output = nlms_filter(input, reference, 32, 0.1f, 1e-6f);
+    ASSERT_EQ(output.size(), 8);
+    for (int i = 0; i < 8; ++i) {
+        EXPECT_FLOAT_EQ(output[i], input[i]);
+    }
+}
+
 TEST(RadarCFARTest, MTIFilter) {
     // Test 2-pulse MTI canceller
     size_t n_pulses = 32;

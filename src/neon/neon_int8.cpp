@@ -20,6 +20,7 @@
  *   writes disjoint rows of C.
  */
 #include "optmath/neon_int8.hpp"
+#include <cstdint>
 #include <vector>
 
 #ifdef OPTMATH_USE_DOTPROD
@@ -35,7 +36,7 @@ namespace neon {
 // current 4-row A tile must stay L1-resident (64KB on the A76) so Bt is reused
 // across the MC-row block instead of being re-streamed from L2/L3 for every
 // row tile — that re-streaming is what made the naive kernel collapse at 4
-// threads. NC*K + MC*K should sit comfortably inside L1/L2; these are capped
+// threads. NC*K + MC*K should sit comfortably inside L1/L2; NC is capped
 // per K at run time below.
 static constexpr std::size_t INT8_MC = 64;
 static constexpr std::size_t INT8_NC = 32;
@@ -113,13 +114,24 @@ void neon_gemm_s8s8s32(std::int32_t* C, std::size_t ldc,
     // Cache-blocked, threaded over the MC row-blocks (disjoint C rows -> no
     // false sharing on the row-major C). Within a row-block, sweeping NC-wide
     // Bt panels keeps each panel L1-resident across the block's rows.
+    // Cap NC so (MC + NC)*K int8 bytes stay inside ~32 KiB of the 64 KiB L1D.
+    std::size_t nc = INT8_NC;
+    if (K > 0) {
+        constexpr std::size_t l1_budget = 32768;
+        const std::size_t max_panel = l1_budget / K;
+        std::size_t max_nc = (max_panel > INT8_MC) ? (max_panel - INT8_MC) : 4;
+        if (max_nc < 4) max_nc = 4;
+        if (nc > max_nc) nc = max_nc;
+        nc = (nc / 4) * 4;
+        if (nc == 0) nc = 4;
+    }
     const std::size_t MB = (M + INT8_MC - 1) / INT8_MC;
     #pragma omp parallel for schedule(dynamic) if(M >= 256)
     for (std::size_t ib = 0; ib < MB; ++ib) {
         const std::size_t ic = ib * INT8_MC;
         const std::size_t i_end = (ic + INT8_MC < M) ? ic + INT8_MC : M;
-        for (std::size_t jc = 0; jc < N; jc += INT8_NC) {
-            const std::size_t j_end = (jc + INT8_NC < N) ? jc + INT8_NC : N;
+        for (std::size_t jc = 0; jc < N; jc += nc) {
+            const std::size_t j_end = (jc + nc < N) ? jc + nc : N;
             std::size_t i = ic;
             for (; i + 4 <= i_end; i += 4) {
                 const std::int8_t* a0 = A + (i + 0) * K;
@@ -163,7 +175,7 @@ void neon_conv2d_s8s8s32(std::int32_t* out, const std::int8_t* in,
     const std::size_t out_cols = in_cols - k_cols + 1;
 
 #ifdef OPTMATH_USE_DOTPROD
-    #pragma omp parallel for schedule(static) if(out_rows >= 64)
+    #pragma omp parallel for schedule(static) if(static_cast<std::uint64_t>(out_rows) * out_cols * k_rows * k_cols >= 16384ull)
     for (std::size_t r = 0; r < out_rows; ++r) {
         std::size_t c = 0;
         // 8 output columns at a time. Two int32x4 accumulators (low/high halves).

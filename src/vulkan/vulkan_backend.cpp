@@ -446,14 +446,21 @@ bool VulkanContext::init() {
 // Forward declaration for cleanup
 static void cleanupPipelineCache(VkDevice device);
 static void cleanupBufferPool(VkDevice device);
+static void cleanupComputeCache(VkDevice device, VkCommandPool commandPool);
 
 void VulkanContext::cleanup() {
     if (device) {
         vkDeviceWaitIdle(device);
-        // Free pooled scratch buffers and the pipeline cache before the device.
+        // Free cached dispatch objects, pooled scratch buffers and the
+        // pipeline cache before the device. The command-buffer / fence /
+        // descriptor-pool trio is file-scope (used by run_compute); leaving
+        // them set after this teardown would reuse destroyed handles on the
+        // next init()+dispatch cycle.
+        cleanupComputeCache(device, commandPool);
         cleanupBufferPool(device);
         cleanupPipelineCache(device);
         vkDestroyCommandPool(device, commandPool, nullptr);
+        commandPool = VK_NULL_HANDLE;
         vkDestroyDevice(device, nullptr);
         device = VK_NULL_HANDLE;
     }
@@ -491,6 +498,28 @@ struct PipelineState {
 // Map shader name to pipeline state
 static std::map<std::string, PipelineState> g_pipelineCache;
 static std::mutex g_pipelineCacheMutex;
+
+// Cached dispatch objects for run_compute. Reset by cleanupComputeCache.
+static std::mutex s_computeMutex;
+static VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+static VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+static VkFence fence = VK_NULL_HANDLE;
+
+static void cleanupComputeCache(VkDevice device, VkCommandPool pool) {
+    std::lock_guard<std::mutex> lock(s_computeMutex);
+    if (fence != VK_NULL_HANDLE) {
+        vkDestroyFence(device, fence, nullptr);
+        fence = VK_NULL_HANDLE;
+    }
+    if (commandBuffer != VK_NULL_HANDLE && pool != VK_NULL_HANDLE) {
+        vkFreeCommandBuffers(device, pool, 1, &commandBuffer);
+        commandBuffer = VK_NULL_HANDLE;
+    }
+    if (descriptorPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(device, descriptorPool, nullptr);
+        descriptorPool = VK_NULL_HANDLE;
+    }
+}
 
 static void cleanupPipelineCache(VkDevice device) {
     std::lock_guard<std::mutex> lock(g_pipelineCacheMutex);
@@ -730,12 +759,8 @@ static void run_compute(const std::string& shaderName,
     // A single mutex serializes host calls (a VkQueue must be externally
     // synchronized). The call is still synchronous — it waits on the fence
     // before returning — so the buffer-pool release in ~BufferWrapper stays safe.
-    static std::mutex s_mutex;
-    std::lock_guard<std::mutex> lock(s_mutex);
-
-    static VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
-    static VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-    static VkFence fence = VK_NULL_HANDLE;
+    // Handles are file-scope so VulkanContext::cleanup() can destroy them.
+    std::lock_guard<std::mutex> lock(s_computeMutex);
     VkResult result;
     if (descriptorPool == VK_NULL_HANDLE) {
         VkDescriptorPoolSize poolSize{};
@@ -1412,7 +1437,14 @@ Eigen::MatrixXf vulkan_correlation_2d(const Eigen::MatrixXf& x, const Eigen::Mat
 
 // Helper for reduction
 static float run_reduction(const Eigen::VectorXf& a, const std::string& shaderName, float initialVal, float (*cpuReduce)(float, float), uint32_t workgroupSize = 256) {
-    if (!is_available() || a.size() == 0) return initialVal;
+    if (a.size() == 0) return initialVal;
+    if (!is_available()) {
+        float result = a[0];
+        for (Eigen::Index i = 1; i < a.size(); ++i) {
+            result = cpuReduce(result, a[i]);
+        }
+        return result;
+    }
 
     size_t count = a.size();
     size_t sizeBytes = count * sizeof(float);
@@ -1455,21 +1487,30 @@ float vulkan_reduce_sum(const Eigen::VectorXf& a) {
         (g_reduceBackend == ReduceBackend::Auto && ctx.subgroupCanReduce);
     const char* shader = useSubgroup ? "reduce_sum_subgroup.comp.spv" : "reduce_sum.comp.spv";
     return run_reduction(a, shader, 0.0f, [](float x, float y){ return x + y; });
-    } catch (const std::exception&) { return 0.0f; }
+    } catch (const std::exception&) {
+        if (a.size() == 0) return 0.0f;
+        return a.sum();
+    }
 }
 
 float vulkan_reduce_max(const Eigen::VectorXf& a) {
     try {
     if (a.size() == 0) return 0.0f;
     return run_reduction(a, "reduce_max.comp.spv", a[0], [](float x, float y){ return std::max(x, y); });
-    } catch (const std::exception&) { return 0.0f; }
+    } catch (const std::exception&) {
+        if (a.size() == 0) return 0.0f;
+        return a.maxCoeff();
+    }
 }
 
 float vulkan_reduce_min(const Eigen::VectorXf& a) {
     try {
     if (a.size() == 0) return 0.0f;
     return run_reduction(a, "reduce_min.comp.spv", a[0], [](float x, float y){ return std::min(x, y); });
-    } catch (const std::exception&) { return 0.0f; }
+    } catch (const std::exception&) {
+        if (a.size() == 0) return 0.0f;
+        return a.minCoeff();
+    }
 }
 
 Eigen::VectorXf vulkan_scan_prefix_sum(const Eigen::VectorXf& a) {

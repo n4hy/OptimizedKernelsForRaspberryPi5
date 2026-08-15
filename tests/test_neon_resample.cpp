@@ -193,3 +193,26 @@ TEST(NeonResampleTest, EigenWrapper) {
         EXPECT_NEAR(result[i], 2.0f, 1e-5f);
     }
 }
+
+TEST(NeonResampleTest, InvalidLMDoesNotDivideByZero) {
+    // L==0 used to divide by zero in init; M==0 made the output loop hang.
+    const float in[] = {1.0f, 2.0f, 3.0f, 4.0f};
+    const float filter[] = {1.0f};
+    float out[16];
+    std::size_t out_len = 99;
+
+    neon_resample_oneshot_f32(out, &out_len, in, 4, filter, 1, 0, 1);
+    EXPECT_EQ(out_len, 0u);
+
+    out_len = 99;
+    neon_resample_oneshot_f32(out, &out_len, in, 4, filter, 1, 1, 0);
+    EXPECT_EQ(out_len, 0u);
+
+    out_len = 99;
+    neon_resample_oneshot_f32(out, &out_len, in, 4, filter, 0, 1, 1);
+    EXPECT_EQ(out_len, 0u);
+
+    Eigen::VectorXf empty = neon_resample(Eigen::VectorXf::Ones(4),
+                                          Eigen::VectorXf::Ones(1), 0, 1);
+    EXPECT_EQ(empty.size(), 0);
+}

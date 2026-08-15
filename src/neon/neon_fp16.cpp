@@ -6,8 +6,10 @@
  * IEEE binary16 kernels for ARMv8.2-A FEAT_FP16 cores (Raspberry Pi 5
  * Cortex-A76). 8 lanes per 128-bit vector double the elementwise throughput of
  * the fp32 paths. Elementwise ops (add/mul/relu) are exact in fp16; the dot
- * product multiplies in fp16 but accumulates in fp32 to avoid fp16 accumulation
- * drift over long vectors.
+ * product widens each operand to fp32 before multiplying so a single term
+ * whose product exceeds the fp16 finite range (65504) cannot saturate to Inf
+ * and poison the sum. Accumulation is also fp32 to avoid drift over long
+ * vectors.
  *
  * Compiled only when the target supports FP16 vector arithmetic (guarded by
  * OPTMATH_USE_FP16, set by CMake). The A76 lacks FEAT_FHM (fp16->fp32 fused
@@ -63,15 +65,21 @@ float neon_dot_f16(const __fp16* a, const __fp16* b, std::size_t n) {
     const float16_t* pa = reinterpret_cast<const float16_t*>(a);
     const float16_t* pb = reinterpret_cast<const float16_t*>(b);
 
-    // Multiply in fp16 (8 lanes), widen the two halves to fp32 and accumulate
-    // in fp32 with two independent accumulators for the A76 dual-FMA pipes.
+    // Widen first, then multiply-accumulate in fp32. Forming the product in
+    // fp16 saturates any term with |a*b| > 65504 to Inf and poisons the sum,
+    // while the scalar tail (below) already computes in fp32 — the two paths
+    // disagreed on the same values. Two independent accumulators feed the
+    // A76 dual-FMA pipes.
     float32x4_t acc0 = vdupq_n_f32(0.0f);
     float32x4_t acc1 = vdupq_n_f32(0.0f);
     std::size_t i = 0;
     for (; i + 7 < n; i += 8) {
-        float16x8_t prod = vmulq_f16(vld1q_f16(pa + i), vld1q_f16(pb + i));
-        acc0 = vaddq_f32(acc0, vcvt_f32_f16(vget_low_f16(prod)));
-        acc1 = vaddq_f32(acc1, vcvt_f32_f16(vget_high_f16(prod)));
+        float16x8_t va = vld1q_f16(pa + i);
+        float16x8_t vb = vld1q_f16(pb + i);
+        acc0 = vfmaq_f32(acc0, vcvt_f32_f16(vget_low_f16(va)),
+                               vcvt_f32_f16(vget_low_f16(vb)));
+        acc1 = vfmaq_f32(acc1, vcvt_f32_f16(vget_high_f16(va)),
+                               vcvt_f32_f16(vget_high_f16(vb)));
     }
     float sum = vaddvq_f32(vaddq_f32(acc0, acc1));
     for (; i < n; ++i) {

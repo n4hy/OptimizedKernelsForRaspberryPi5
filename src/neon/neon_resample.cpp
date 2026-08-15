@@ -36,6 +36,17 @@ namespace neon {
 void neon_resample_init(PolyphaseResamplerState& state,
                         const float* filter, std::size_t filter_len,
                         std::size_t L, std::size_t M) {
+    if (L == 0 || M == 0 || filter_len == 0 || filter == nullptr) {
+        state.L = 0;
+        state.M = 0;
+        state.n_taps = 0;
+        state.phase_acc = 0;
+        state.phases.clear();
+        state.delay.clear();
+        state.delay_pos = 0;
+        return;
+    }
+
     state.L = L;
     state.M = M;
     state.n_taps = (filter_len + L - 1) / L;
@@ -79,6 +90,9 @@ std::size_t neon_resample_f32(float* out, std::size_t out_capacity,
     const std::size_t L = state.L;
     const std::size_t M = state.M;
     const std::size_t n_taps = state.n_taps;
+    if (L == 0 || M == 0 || n_taps == 0 || state.delay.empty()) {
+        return 0;
+    }
 
     for (std::size_t i = 0; i < input_len; ++i) {
         // Push input sample. The window keeps oldest at [0], newest at [n_taps-1].
