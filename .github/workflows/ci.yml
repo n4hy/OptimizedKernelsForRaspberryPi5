@@ -126,10 +126,16 @@ jobs:
           wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update
-          # nvcc + cudart headers only; the full toolkit is ~3 GB and unnecessary
-          # for a configure-only check.
+          # Not the full ~3 GB toolkit, but the generate step resolves the
+          # CUDA::cublas / cufft / cusolver imported targets that src/CMakeLists.txt
+          # links, so their dev packages are required too (cusolver pulls cusparse).
           sudo apt-get install -y --no-install-recommends \
-            cuda-nvcc-${{ matrix.cuda }} cuda-cudart-dev-${{ matrix.cuda }}
+            cuda-nvcc-${{ matrix.cuda }} \
+            cuda-cudart-dev-${{ matrix.cuda }} \
+            libcublas-dev-${{ matrix.cuda }} \
+            libcufft-dev-${{ matrix.cuda }} \
+            libcusolver-dev-${{ matrix.cuda }} \
+            libcusparse-dev-${{ matrix.cuda }}
           /usr/local/${{ matrix.cuda_dir }}/bin/nvcc --version
 
       - name: Configure and assert resolved architectures
