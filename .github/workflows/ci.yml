@@ -94,3 +94,111 @@ jobs:
       - name: Test
         run: ctest --output-on-failure
         working-directory: build
+
+  # Configure-only check of the CUDA architecture-selection logic in CMakeLists.txt.
+  # No GPU is needed: enable_language(CUDA) only has to compile, not run, anything.
+  # This guards two regressions that shipped silently before:
+  #   1. the default list omitting consumer Blackwell (sm_120)
+  #   2. `CACHE ... FORCE` overwriting an explicit -DCMAKE_CUDA_ARCHITECTURES
+  # The OPTMATH_CUDA_NATIVE path is deliberately NOT covered here -- "native" asks
+  # nvcc to detect an installed GPU, which a GitHub-hosted runner does not have.
+  cuda-config:
+    name: CUDA ${{ matrix.cuda }} arch selection (configure-only)
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cuda: '13-0'
+            cuda_dir: cuda-13.0
+            expect_default: '75;80;86;89;90;100;103;120;121'
+          - cuda: '12-8'
+            cuda_dir: cuda-12.8
+            expect_default: '50;52;60;61;70;75;80;86;89;100;120'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nvcc and Eigen
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build libeigen3-dev wget
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          # nvcc + cudart headers only; the full toolkit is ~3 GB and unnecessary
+          # for a configure-only check.
+          sudo apt-get install -y --no-install-recommends \
+            cuda-nvcc-${{ matrix.cuda }} cuda-cudart-dev-${{ matrix.cuda }}
+          /usr/local/${{ matrix.cuda_dir }}/bin/nvcc --version
+
+      - name: Configure and assert resolved architectures
+        env:
+          NVCC: /usr/local/${{ matrix.cuda_dir }}/bin/nvcc
+          EXPECT_DEFAULT: ${{ matrix.expect_default }}
+        run: |
+          set -euo pipefail
+
+          # Echo back whatever CMake actually resolved into the cache.
+          resolved() {
+            grep -E '^CMAKE_CUDA_ARCHITECTURES(:[A-Z]+)?=' "$1/CMakeCache.txt" \
+              | head -1 | cut -d= -f2-
+          }
+
+          # A -D value lands in CMakeCache.txt verbatim even when configure ABORTS,
+          # so the cache alone cannot tell us the arch logic ran. Every case below
+          # therefore also requires (a) a clean exit and (b) the status line that
+          # only the selection block emits.
+          configure() {
+            local dir="$1"; shift
+            if ! cmake -S . -B "$dir" -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DENABLE_NEON=OFF -DENABLE_SVE2=OFF \
+              -DENABLE_VULKAN=OFF -DENABLE_CUDA=ON \
+              -DCMAKE_CUDA_COMPILER="$NVCC" \
+              -DBUILD_TESTS=OFF -DBUILD_BENCHMARKS=OFF \
+              "$@" > "$dir.log" 2>&1; then
+              echo "FAIL: configure errored for '$dir'"
+              cat "$dir.log"
+              return 1
+            fi
+            # find_package(CUDAToolkit) failing would skip the arch block entirely.
+            if ! grep -q 'CUDA found:' "$dir.log"; then
+              echo "FAIL: CUDAToolkit not found in '$dir'"
+              cat "$dir.log"
+              return 1
+            fi
+          }
+
+          check() {
+            local label="$1" dir="$2" want_arch="$3" want_msg="$4"
+            local got
+            got="$(resolved "$dir")"
+            if [ "$got" != "$want_arch" ]; then
+              echo "FAIL: $label -- expected '$want_arch', got '$got'"
+              return 1
+            fi
+            if ! grep -qF "$want_msg" "$dir.log"; then
+              echo "FAIL: $label -- arch block did not run (no '$want_msg' in log)"
+              return 1
+            fi
+            echo "PASS: $label -> $got"
+          }
+
+          rc=0
+
+          configure build-default \
+            && check "default list" build-default "$EXPECT_DEFAULT" \
+                 "Architectures: $EXPECT_DEFAULT" || rc=1
+
+          # The regression: an explicit list used to be clobbered by CACHE FORCE.
+          configure build-explicit -DCMAKE_CUDA_ARCHITECTURES="86;89" \
+            && check "explicit override" build-explicit "86;89" \
+                 "CUDA architectures (user-specified): 86;89" || rc=1
+
+          # Explicit must also win over OPTMATH_CUDA_NATIVE.
+          configure build-both -DOPTMATH_CUDA_NATIVE=ON -DCMAKE_CUDA_ARCHITECTURES="75" \
+            && check "explicit beats native" build-both "75" \
+                 "CUDA architectures (user-specified): 75" || rc=1
+
+          exit $rc
