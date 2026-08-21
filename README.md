@@ -286,7 +286,8 @@ cat /proc/cpuinfo | grep avx2
 | **RTX 4000** | Ada Lovelace | 8.9 | 5888-16384 | 184-512 | 8-24 GB |
 | **H100** | Hopper | 9.0 | 14592 | 456 | 80 GB |
 | **Jetson Orin** | Ampere | 8.7 | 1024-2048 | 32-64 | 8-64 GB |
-| **RTX 5000** | Blackwell | 10.0 | 21760 | 680 | 32 GB |
+| **RTX 5000** | Blackwell (consumer) | 12.0 | 4608-21760 | 144-680 | 8-32 GB |
+| **B100/B200** | Blackwell (datacenter) | 10.0 | 16896-18432 | 528-576 | 180-192 GB |
 
 **Architecture Features**:
 | Architecture | SM | FP16 | Tensor Cores | TF32 | FP8 |
@@ -298,7 +299,8 @@ cat /proc/cpuinfo | grep avx2
 | Ampere | 8.x | ✅ | ✅ Gen 3 | ✅ | ❌ |
 | Ada | 8.9 | ✅ | ✅ Gen 4 | ✅ | ✅ |
 | Hopper | 9.x | ✅ | ✅ Gen 4 | ✅ | ✅ |
-| Blackwell | 10.x | ✅ | ✅ Gen 5 | ✅ | ✅ |
+| Blackwell (datacenter) | 10.x | ✅ | ✅ Gen 5 | ✅ | ✅ |
+| Blackwell (consumer) | 12.x | ✅ | ✅ Gen 5 | ✅ | ✅ |
 
 **CUDA Toolkit Requirements**:
 | GPU Architecture | Minimum CUDA | Recommended CUDA | SM Version |
@@ -310,9 +312,16 @@ cat /proc/cpuinfo | grep avx2
 | Ampere (RTX 30xx) | CUDA 11.0 | CUDA 12.x | SM 8.0/8.6 |
 | Ada (RTX 40xx) | CUDA 11.8 | CUDA 12.x | SM 8.9 |
 | Hopper (H100) | CUDA 12.0 | CUDA 12.x | SM 9.0 |
-| Blackwell (RTX 50xx) | **CUDA 12.8** | **CUDA 13.0+** | SM 10.0 |
+| Blackwell consumer (RTX 50xx) | **CUDA 12.8** | **CUDA 13.0+** | SM 12.0 |
+| Blackwell datacenter (B100/B200) | **CUDA 12.8** | **CUDA 13.0+** | SM 10.0 |
 
-> **Note**: RTX 5090 (Blackwell) requires CUDA 12.8+ for native SM 10.0 support. Earlier CUDA versions (e.g., 12.0 from Ubuntu packages) will compile with SM 9.0a for Hopper, but this may cause runtime issues due to PTX forward compatibility limitations. For optimal Blackwell performance, install CUDA 12.8+ directly from NVIDIA.
+> **Note**: Every consumer RTX 50xx part — 5090, 5080, 5070 Ti, 5070, 5060, desktop **and**
+> laptop (GB202/203/205/206/207) — is compute capability **12.0** (`sm_120`). SM 10.0/10.3 are
+> the *datacenter* GB100/GB200 parts and are **not** interchangeable: `sm_100` PTX will not JIT
+> onto an `sm_120` device, so a build targeting only 100/103 fails at kernel launch on a GeForce
+> card with `no kernel image is available for execution on the device`. Confirm your own card with
+> `nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader` and pass that number.
+> RTX 50xx requires CUDA 12.8+; earlier toolkits have no `sm_120` target at all.
 
 **CUDA Performance (RTX 4090)**:
 | Operation | CUDA Time | CPU Time | Speedup |
@@ -444,7 +453,7 @@ nvidia-smi       # Shows driver and GPU info
 ```bash
 # Check your GPU's compute capability
 nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
-# Example output: "NVIDIA GeForce RTX 5090, 10.0" (Blackwell)
+# Example output: "NVIDIA GeForce RTX 5090, 12.0" (consumer Blackwell -> sm_120)
 ```
 
 #### Vulkan Shader Compiler (required for Vulkan backend)
@@ -505,7 +514,9 @@ make -j$(nproc)
 ```bash
 mkdir -p build && cd build
 
-# Default: All architectures Maxwell through Blackwell (CUDA 13+)
+# Default: every architecture the installed toolkit supports (Turing..Blackwell on CUDA 13+).
+# Broadest compatibility, slowest compile. If nvcc is not on PATH, add
+# -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
 cmake -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
       -DENABLE_NEON=OFF \
@@ -513,6 +524,13 @@ cmake -DCMAKE_BUILD_TYPE=Release \
       -DENABLE_CUDA=ON \
       -DBUILD_TESTS=ON \
       -DCMAKE_INSTALL_PREFIX=/usr/local \
+      ..
+
+# Fastest: build only for the GPU in THIS machine (auto-detected via nvcc).
+# Recommended for a local install; requires CMake 3.24+.
+cmake -DCMAKE_BUILD_TYPE=Release \
+      -DENABLE_CUDA=ON \
+      -DOPTMATH_CUDA_NATIVE=ON \
       ..
 
 # Specific architectures - Modern GPUs only (RTX 20xx/30xx/40xx)
@@ -527,13 +545,15 @@ cmake -DCMAKE_BUILD_TYPE=Release \
       -DENABLE_CUDA=ON \
       ..
 
-# For RTX 50xx Blackwell (REQUIRES CUDA 12.8+ or CUDA 13)
+# For consumer RTX 50xx Blackwell (REQUIRES CUDA 12.8+ or CUDA 13).
+# SM 120 covers every GeForce 50-series part, desktop and laptop.
+# Use "100;103" ONLY for datacenter B100/B200 - those are a different, incompatible target.
 cmake -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
       -DENABLE_NEON=OFF \
       -DENABLE_VULKAN=ON \
       -DENABLE_CUDA=ON \
-      -DCMAKE_CUDA_ARCHITECTURES="100" \
+      -DCMAKE_CUDA_ARCHITECTURES="120" \
       -DCMAKE_CXX_FLAGS="-O3 -march=native" \
       -DBUILD_TESTS=ON \
       -DCMAKE_INSTALL_PREFIX=/usr/local \
@@ -551,7 +571,8 @@ make -j$(nproc)
 | `ENABLE_I8MM` | ON | Enable I8MM int8 matrix multiply |
 | `ENABLE_VULKAN` | ON | Enable Vulkan compute |
 | `ENABLE_CUDA` | ON | Enable NVIDIA CUDA |
-| `CMAKE_CUDA_ARCHITECTURES` | *auto, per toolkit*: CUDA 13+ → `75;80;86;89;90;100;103`; CUDA 12.x → `50;52;60;61;70;75;80;86;89`; CUDA 11.x → `50;52;60;61;70;75;80;86` (see `CMakeLists.txt`) | CUDA compute capabilities. Pass this option to override, or `-DOPTMATH_CUDA_NATIVE=ON` to build only for the detected GPU. |
+| `CMAKE_CUDA_ARCHITECTURES` | *auto, per toolkit*: CUDA 13+ → `75;80;86;89;90;100;103;120;121`; CUDA 12.8+ → `50;52;60;61;70;75;80;86;89;100;120`; CUDA 12.0-12.7 → `50;52;60;61;70;75;80;86;89`; CUDA 11.x → `50;52;60;61;70;75;80;86` (see `CMakeLists.txt`) | CUDA compute capabilities. An explicit value here always wins and is never overwritten by the defaults. |
+| `OPTMATH_CUDA_NATIVE` | OFF | Build only for the GPU detected in this machine (fast compile, not portable). Needs CMake 3.24+. Ignored if `CMAKE_CUDA_ARCHITECTURES` is set explicitly. |
 | `BUILD_TESTS` | ON | Build GoogleTest tests |
 | `BUILD_BENCHMARKS` | OFF | Build Google Benchmark |
 | `CMAKE_POSITION_INDEPENDENT_CODE` | ON | Enable -fPIC (set globally) |
@@ -1347,7 +1368,7 @@ On x86_64 the CUDA suite is built (running on the RTX 5070 Ti) in place of the A
 
 Tested on an Intel Core Ultra 9 285K (24 cores @ 5.5 GHz; L1 48 KiB, L2 3 MiB, L3 36 MiB) with a discrete **NVIDIA GeForce RTX 5090** (Blackwell, consumer GB20x — `nvidia-smi` reports **compute_cap 12.0** / `sm_120`, 32 GB; CUDA 13.0.88, driver 580.126.20, Vulkan Instance 1.3.275 / device apiVersion 1.4.318). Built with the default options (`ENABLE_CUDA=ON`, `ENABLE_VULKAN=ON`, NEON/SVE2 left on but inactive on x86_64), Release, C++20.
 
-> **CUDA architectures note (v0.6.3).** The default `CMAKE_CUDA_ARCHITECTURES` list is `75;80;86;89;90;100;103` — this includes datacenter Blackwell (SM 10.0) but *not* consumer Blackwell (SM 12.0). On this box the CUDA suite therefore runs on the RTX 5090 via PTX JIT from the highest matching arch, not from native `sm_120` cubins. All 36 CUDA tests still pass; for peak `sm_120` performance pass `-DCMAKE_CUDA_ARCHITECTURES="...;120"` at configure time.
+> **CUDA architectures note.** These figures were measured when the default `CMAKE_CUDA_ARCHITECTURES` list was `75;80;86;89;90;100;103` — datacenter Blackwell (SM 10.0) but *not* consumer Blackwell (SM 12.0) — so the CUDA suite ran on the RTX 5090 via PTX JIT rather than native `sm_120` cubins. The default now includes `120;121`, so a fresh build targets `sm_120` natively and these numbers are conservative. `-DOPTMATH_CUDA_NATIVE=ON` builds for the detected GPU alone.
 
 > The same caveats as the 275HX/5070 Ti section above apply: NEON/SVE2-direct benchmark cases report `ERROR OCCURRED: 'NEON not available'` on x86_64 and are skipped here; CPU figures come from the Eigen-reference and scalar-fallback paths. The Vulkan microbenchmarks are end-to-end (allocation + host↔device copy per iteration), so the discrete RTX pays PCIe transfer latency and these numbers are **transfer-bound, not** the RTX 5090's peak compute. The Vulkan backend auto-selects the discrete GPU and logs `[Vulkan] Selected GPU: NVIDIA GeForce RTX 5090`.
 
@@ -1466,28 +1487,32 @@ export PATH=/usr/local/cuda/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 ```
 
-**"Unsupported gpu architecture 'compute_100'"** (Blackwell):
+**"Unsupported gpu architecture 'compute_120'"** (or `compute_100`) on Blackwell:
 ```bash
-# Your CUDA toolkit is too old for Blackwell (RTX 50xx)
-nvcc --version  # Shows version (needs 12.8+ for SM 100)
+# Your CUDA toolkit is too old for Blackwell. sm_120 (consumer RTX 50xx) and
+# sm_100 (datacenter B100/B200) both require CUDA 12.8 or newer.
+nvcc --version                       # need 12.8+
+nvcc --list-gpu-code | tr '\n' ' '   # authoritative list of targets this nvcc can emit
 
-# Option 1: Install CUDA 12.8+ from NVIDIA
+# Option 1: Install CUDA 12.8+ (ideally 13.x) from NVIDIA
 # https://developer.nvidia.com/cuda-downloads
 
-# Option 2: Use Hopper SM 90a (runs via PTX forward compatibility, may have issues)
-cmake -DCMAKE_CUDA_ARCHITECTURES="90a" ..
-
-# Option 3: Use Vulkan backend instead (full GPU acceleration, no CUDA needed)
+# Option 2: Use the Vulkan backend instead (full GPU acceleration, no CUDA needed)
 cmake -DENABLE_CUDA=OFF -DENABLE_VULKAN=ON ..
 ```
 
-**CUDA tests fail with zeros/segfault on RTX 50xx**:
+**"no kernel image is available for execution on the device"** on RTX 50xx:
 ```bash
-# PTX forward compatibility from SM 90a to Blackwell SM 100 can have issues
-# The Vulkan backend works correctly on RTX 50xx
+# You built for the wrong Blackwell. Consumer GeForce 50-series is sm_120;
+# sm_100/sm_103 are datacenter parts and their PTX will NOT JIT onto sm_120.
+nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader   # e.g. "..., 12.0"
 
-# Solution: Install CUDA 12.8+ for native Blackwell support
-# Or use Vulkan for GPU acceleration until CUDA is upgraded
+# Rebuild for the reported capability (12.0 -> 120), or just let CMake detect it:
+cmake -DCMAKE_CUDA_ARCHITECTURES="120" ..   # explicit
+cmake -DOPTMATH_CUDA_NATIVE=ON ..           # auto-detect this machine's GPU
+
+# Verify what actually landed in the binary:
+cuobjdump ./tests/test_cuda_kernels | grep arch    # expect "arch = sm_120"
 ```
 
 **"-fPIC" linking error when building shared libraries**:

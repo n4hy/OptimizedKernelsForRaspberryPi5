@@ -132,6 +132,15 @@ endif()
 # 4. CUDA (NVIDIA GPU support)
 if(ENABLE_CUDA)
     if(CMAKE_CUDA_COMPILER)
+        # Record whether the user pinned -DCMAKE_CUDA_ARCHITECTURES on the command line.
+        # This has to happen before enable_language(CUDA), which populates the variable
+        # with the toolkit default and makes "user asked for it" indistinguishable after.
+        if(DEFINED CMAKE_CUDA_ARCHITECTURES)
+            set(_OPTMATH_CUDA_ARCH_USER_SET TRUE)
+        else()
+            set(_OPTMATH_CUDA_ARCH_USER_SET FALSE)
+        endif()
+
         enable_language(CUDA)
         find_package(CUDAToolkit)
         if(CUDAToolkit_FOUND)
@@ -142,28 +151,51 @@ if(ENABLE_CUDA)
             set(CMAKE_CUDA_STANDARD 17)
             set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-            # GPU Architecture Configuration
-            # By default, build for multiple architectures for broad compatibility.
-            # Use -DOPTMATH_CUDA_NATIVE=ON to build only for the detected GPU (faster compile).
-            # Use -DCMAKE_CUDA_ARCHITECTURES="75;86" to specify exact architectures.
+            # GPU Architecture Configuration. Precedence, highest first:
+            #   1. -DCMAKE_CUDA_ARCHITECTURES="75;86"  explicit list, always honoured
+            #   2. -DOPTMATH_CUDA_NATIVE=ON            detect this machine's GPU (fast compile)
+            #   3. (default)                           multi-arch list per toolkit version
+            # Consumer RTX 50xx (all GB20x, desktop and laptop) is SM 120 -- NOT 100/103,
+            # which are the datacenter GB100/GB200 parts.
             option(OPTMATH_CUDA_NATIVE "Build only for detected GPU architecture (faster compile)" OFF)
 
-            if(OPTMATH_CUDA_NATIVE)
-                # Use CMake's auto-detected architecture (single GPU)
-                message(STATUS "  CUDA Native mode - Building for detected GPU: SM ${CMAKE_CUDA_ARCHITECTURES}")
-            else()
+            if(_OPTMATH_CUDA_ARCH_USER_SET)
+                # An explicit -DCMAKE_CUDA_ARCHITECTURES always wins; never overwrite it.
+                message(STATUS "  CUDA architectures (user-specified): ${CMAKE_CUDA_ARCHITECTURES}")
+            elseif(OPTMATH_CUDA_NATIVE)
+                # "native" makes nvcc detect the GPU actually installed in this machine.
+                # Requires CMake 3.24+; older CMake falls through to the version defaults.
+                if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24")
+                    set(CMAKE_CUDA_ARCHITECTURES native CACHE STRING "CUDA architectures" FORCE)
+                    message(STATUS "  CUDA Native mode - building for this machine's detected GPU only")
+                else()
+                    message(WARNING "  OPTMATH_CUDA_NATIVE needs CMake 3.24+ (have ${CMAKE_VERSION}); "
+                                    "falling back to the multi-architecture default. "
+                                    "Pass -DCMAKE_CUDA_ARCHITECTURES=<sm> explicitly instead.")
+                    set(OPTMATH_CUDA_NATIVE OFF)
+                endif()
+            endif()
+
+            if(NOT _OPTMATH_CUDA_ARCH_USER_SET AND NOT OPTMATH_CUDA_NATIVE)
                 # Build for multiple architectures based on CUDA toolkit version
                 if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "13.0")
                     # CUDA 13+ dropped support for SM < 75 (Maxwell, Pascal, Volta removed)
-                    # Supported: Turing (75), Ampere (80,86,87,89), Hopper (90,90a), Blackwell (100,103)
-                    # SM 100: RTX 5090/5080 (GB202/GB203), SM 103: RTX 5070/5060 (GB205/GB206)
-                    set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;90;100;103" CACHE STRING "CUDA architectures" FORCE)
+                    # Supported: Turing (75), Ampere (80,86,87,89), Hopper (90),
+                    # datacenter Blackwell (100,103), consumer Blackwell (120,121).
+                    # SM 100/103: GB100/GB200 datacenter parts.
+                    # SM 120: ALL consumer RTX 50xx (GB202/203/205/206/207), desktop and laptop.
+                    set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;90;100;103;120;121" CACHE STRING "CUDA architectures" FORCE)
                     message(STATUS "  CUDA 13+ detected - Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
                     message(STATUS "  Note: CUDA 13 minimum is SM 7.5 (Turing). For older GPUs, use CUDA 12.x")
+                elseif(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")
+                    # CUDA 12.8+ adds Blackwell: SM 100 (datacenter) and SM 120 (consumer RTX 50xx)
+                    set(CMAKE_CUDA_ARCHITECTURES "50;52;60;61;70;75;80;86;89;100;120" CACHE STRING "CUDA architectures" FORCE)
+                    message(STATUS "  CUDA 12.8+ detected - Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
                 elseif(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.0")
-                    # CUDA 12.x supports SM 50+ (Maxwell through Hopper/Blackwell with 12.8+)
+                    # CUDA 12.0-12.7 supports SM 50-89 (Maxwell through Ada). No Blackwell.
                     set(CMAKE_CUDA_ARCHITECTURES "50;52;60;61;70;75;80;86;89" CACHE STRING "CUDA architectures" FORCE)
                     message(STATUS "  CUDA 12.x detected - Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+                    message(STATUS "  Note: Blackwell (RTX 50xx) needs CUDA 12.8+ or 13.x")
                 elseif(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "11.0")
                     # CUDA 11.x supports SM 35+ (Kepler through Ampere)
                     set(CMAKE_CUDA_ARCHITECTURES "50;52;60;61;70;75;80;86" CACHE STRING "CUDA architectures" FORCE)
@@ -177,13 +209,17 @@ if(ENABLE_CUDA)
 
             # CUDA Toolkit version detection for architecture-specific features
             if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "13.0")
-                message(STATUS "  CUDA 13+ - Full Blackwell (SM 100) native support")
+                message(STATUS "  CUDA 13+ - Blackwell-capable toolkit (SM 100/103 datacenter, SM 120/121 consumer)")
                 add_compile_definitions(OPTMATH_CUDA_13_PLUS)
             endif()
 
             # Architecture-specific optimizations (newest to oldest)
+            if("120" IN_LIST CMAKE_CUDA_ARCHITECTURES OR "121" IN_LIST CMAKE_CUDA_ARCHITECTURES)
+                message(STATUS "  Blackwell consumer (SM 120/121) enabled - RTX 5090/5080/5070/5060")
+                add_compile_definitions(OPTMATH_CUDA_BLACKWELL)
+            endif()
             if("103" IN_LIST CMAKE_CUDA_ARCHITECTURES OR "100" IN_LIST CMAKE_CUDA_ARCHITECTURES)
-                message(STATUS "  Blackwell (SM 100/103) enabled - RTX 5090/5080/5070 optimizations")
+                message(STATUS "  Blackwell datacenter (SM 100/103) enabled - GB100/GB200")
                 add_compile_definitions(OPTMATH_CUDA_BLACKWELL)
             endif()
             if("90" IN_LIST CMAKE_CUDA_ARCHITECTURES)
