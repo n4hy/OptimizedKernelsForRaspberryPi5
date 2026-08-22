@@ -10,3 +10,10 @@ build*/
 .cache/
 optenv/
 *.spv
+
+# Local Claude Code settings (per-machine permissions, not shared config).
+# .claude/CLAUDE.md is intentionally NOT ignored -- it is project instructions.
+.claude/settings.local.json
+
+# Staged install tree from audit builds (cmake --install output)
+install_audit/
