@@ -92,6 +92,61 @@ TEST(NeonTranscendentalsTest, CosApproximation) {
     }
 }
 
+TEST(NeonTranscendentalsTest, SinCosLargeArgument) {
+    if (!optmath::neon::is_available()) {
+        GTEST_SKIP() << "NEON not available, skipping test.";
+    }
+
+    // Regression: the ONLY sin/cos coverage used to stop at 4*pi, so a broken
+    // range reduction was invisible. Two defects lived in that blind spot:
+    //   * PI_C was wrong in its 5th digit, leaving a 8.5e-12 residual in the
+    //     four-part pi split that grew as 8.5e-12*k;
+    //   * cos was computed as sin(x + pi/2), and forming that sum in float
+    //     costs one ulp of x -- 4.8e-4 of error by |x| = 1e4.
+    // The four-part split is exact for |k| < 2^15, i.e. |x| < ~1.0e5.
+    const float limits[] = {1.0e2f, 1.0e3f, 1.0e4f, 1.0e5f};
+    for (float R : limits) {
+        const int N = 4096;
+        std::vector<float> input(N), sin_out(N), cos_out(N);
+        for (int i = 0; i < N; ++i) {
+            input[i] = -R + 2.0f * R * i / (N - 1);
+        }
+        optmath::neon::neon_fast_sin_f32(sin_out.data(), input.data(), N);
+        optmath::neon::neon_fast_cos_f32(cos_out.data(), input.data(), N);
+
+        for (int i = 0; i < N; ++i) {
+            const double x = static_cast<double>(input[i]);
+            EXPECT_NEAR(sin_out[i], static_cast<float>(std::sin(x)), 1e-5f)
+                << "sin at x = " << input[i] << " (range " << R << ")";
+            EXPECT_NEAR(cos_out[i], static_cast<float>(std::cos(x)), 1e-5f)
+                << "cos at x = " << input[i] << " (range " << R << ")";
+        }
+    }
+}
+
+TEST(NeonTranscendentalsTest, SinCosVectorAndScalarTailAgree) {
+    if (!optmath::neon::is_available()) {
+        GTEST_SKIP() << "NEON not available, skipping test.";
+    }
+
+    // The vectorized body (i + 3 < n) and the scalar tail are separate
+    // implementations of the same reduction; a fix applied to one and not the
+    // other would make results depend on the array length. Feeding n = 4 and
+    // n = 1 exercises exactly one path each.
+    const float xs[] = {0.3f, -2.7f, 12.5f, 137.0f, -981.25f, 12345.75f, -99999.5f};
+    for (float x : xs) {
+        float in4[4] = {x, x, x, x}, s4[4], c4[4];
+        float in1[1] = {x}, s1[1], c1[1];
+        optmath::neon::neon_fast_sin_f32(s4, in4, 4);
+        optmath::neon::neon_fast_cos_f32(c4, in4, 4);
+        optmath::neon::neon_fast_sin_f32(s1, in1, 1);
+        optmath::neon::neon_fast_cos_f32(c1, in1, 1);
+        // FMA in the vector path vs non-FMA in the tail permits ~1 ulp of drift.
+        EXPECT_NEAR(s4[0], s1[0], 1e-6f) << "sin path mismatch at x = " << x;
+        EXPECT_NEAR(c4[0], c1[0], 1e-6f) << "cos path mismatch at x = " << x;
+    }
+}
+
 TEST(NeonTranscendentalsTest, SinCosIdentity) {
     if (!optmath::neon::is_available()) {
         GTEST_SKIP() << "NEON not available, skipping test.";

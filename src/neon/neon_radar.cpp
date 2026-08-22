@@ -51,6 +51,7 @@
 #include "optmath/neon_kernels.hpp"
 #include <cmath>
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <vector>
 
@@ -109,24 +110,30 @@ void generate_window_f32(float* window, std::size_t n, WindowType type, float be
         case WindowType::KAISER: {
             // Kaiser window: w[n] = I0(beta * sqrt(1 - ((n - N/2) / (N/2))^2)) / I0(beta)
             // Using series approximation for I0 (modified Bessel function)
-            auto bessel_i0 = [](float x) -> float {
-                float sum = 1.0f;
-                float term = 1.0f;
-                for (int k = 1; k < 20; ++k) {
-                    term *= (x / (2.0f * k)) * (x / (2.0f * k));
+            // I0(x) = sum_k (x/2)^(2k) / (k!)^2. The old form capped k < 20 and
+            // accumulated in float: at beta = 20 the k=19 term is still ~1e-4 of
+            // the sum, far above the 1e-10 exit threshold, so the loop hit the
+            // iteration cap and returned a truncated I0 -- silently wrong Kaiser
+            // windows for beta >~ 15. Accumulate in double and let the
+            // convergence test, not the cap, terminate it.
+            auto bessel_i0 = [](double x) -> double {
+                double sum = 1.0, term = 1.0;
+                for (int k = 1; k < 200; ++k) {
+                    const double h = x / (2.0 * k);
+                    term *= h * h;
                     sum += term;
-                    if (term < 1e-10f * sum) break;
+                    if (term < 1e-16 * sum) break;
                 }
                 return sum;
             };
 
-            float i0_beta = bessel_i0(beta);
-            float half_n = (n - 1) / 2.0f;
+            const double i0_beta = bessel_i0(static_cast<double>(beta));
+            const double half_n = (n - 1) / 2.0;
 
             for (std::size_t i = 0; i < n; ++i) {
-                float t = (i - half_n) / half_n;
-                float arg = beta * std::sqrt(std::max(0.0f, 1.0f - t * t));
-                window[i] = bessel_i0(arg) / i0_beta;
+                const double t = (static_cast<double>(i) - half_n) / half_n;
+                const double arg = beta * std::sqrt(std::max(0.0, 1.0 - t * t));
+                window[i] = static_cast<float>(bessel_i0(arg) / i0_beta);
             }
             break;
         }
@@ -198,6 +205,29 @@ void apply_window(Eigen::VectorXcf& data, const Eigen::VectorXf& window) {
 // Cross-Correlation
 // =========================================================================
 
+// Overlap range for lag index k of a full cross-correlation.
+// Contract: out[k] = sum_n x[n] * y[n + L], L = k - (ny - 1), over every n with
+// 0 <= n < nx and 0 <= n + L < ny.
+//
+// The previous form computed `len = x_end - x_start` in size_t. Whenever
+// ny > nx + 1 the low lags have x_start > x_end, so len underflowed to ~2^64
+// and the clamp below it rewrote the value to ny - y_offset -- a positive
+// length starting past the end of x. xcorr(VectorXf(2), VectorXf(10)) then read
+// x[9..18] out of a 2-element buffer. Deriving the bounds in signed arithmetic
+// removes the underflow; for nx >= ny the indices are bit-identical to before.
+static inline void xcorr_overlap(std::size_t k, std::size_t nx, std::size_t ny,
+                                 std::size_t& x_start, std::size_t& y_offset,
+                                 std::size_t& len) {
+    const std::ptrdiff_t L = static_cast<std::ptrdiff_t>(k)
+                           - (static_cast<std::ptrdiff_t>(ny) - 1);
+    const std::ptrdiff_t n_lo = std::max<std::ptrdiff_t>(0, -L);
+    const std::ptrdiff_t n_hi = std::min(static_cast<std::ptrdiff_t>(nx),
+                                         static_cast<std::ptrdiff_t>(ny) - L);
+    x_start  = static_cast<std::size_t>(n_lo);
+    y_offset = static_cast<std::size_t>(n_lo + L);
+    len      = (n_hi > n_lo) ? static_cast<std::size_t>(n_hi - n_lo) : 0u;
+}
+
 void xcorr_f32(float* out, const float* x, std::size_t nx,
                const float* y, std::size_t ny) {
     // Full cross-correlation: output size = nx + ny - 1
@@ -211,18 +241,8 @@ void xcorr_f32(float* out, const float* x, std::size_t nx,
     for (std::size_t k = 0; k < out_len; ++k) {
         float sum = 0.0f;
 
-        // Determine overlap range
-        std::size_t x_start = (k >= ny - 1) ? 0 : (ny - 1 - k);
-        std::size_t x_end = std::min(nx, out_len - k);
-
-        // Map to y indices
-        std::size_t y_offset = (k >= ny - 1) ? (k - ny + 1) : 0;
-
-        // Clamp length so y_offset + len <= ny
-        std::size_t len = x_end - x_start;
-        if (y_offset + len > ny) {
-            len = (ny > y_offset) ? ny - y_offset : 0;
-        }
+        std::size_t x_start, y_offset, len;
+        xcorr_overlap(k, nx, ny, x_start, y_offset, len);
 
 #ifdef OPTMATH_USE_NEON
         const float* xp = x + x_start;
@@ -266,15 +286,8 @@ void xcorr_complex_f32(float* out_re, float* out_im,
     for (std::size_t k = 0; k < out_len; ++k) {
         float sum_re = 0.0f, sum_im = 0.0f;
 
-        std::size_t x_start = (k >= ny - 1) ? 0 : (ny - 1 - k);
-        std::size_t x_end = std::min(nx, out_len - k);
-        std::size_t y_offset = (k >= ny - 1) ? (k - ny + 1) : 0;
-
-        // Clamp length so y_offset + len <= ny
-        std::size_t len = x_end - x_start;
-        if (y_offset + len > ny) {
-            len = (ny > y_offset) ? ny - y_offset : 0;
-        }
+        std::size_t x_start, y_offset, len;
+        xcorr_overlap(k, nx, ny, x_start, y_offset, len);
 
 #ifdef OPTMATH_USE_NEON
         const float* xrp = x_re + x_start;
@@ -330,12 +343,14 @@ void xcorr_complex_f32(float* out_re, float* out_im,
 }
 
 Eigen::VectorXf xcorr(const Eigen::VectorXf& x, const Eigen::VectorXf& y) {
+    if (x.size() == 0 || y.size() == 0) return Eigen::VectorXf();
     Eigen::VectorXf result(x.size() + y.size() - 1);
     xcorr_f32(result.data(), x.data(), x.size(), y.data(), y.size());
     return result;
 }
 
 Eigen::VectorXcf xcorr(const Eigen::VectorXcf& x, const Eigen::VectorXcf& y) {
+    if (x.size() == 0 || y.size() == 0) return Eigen::VectorXcf();
     std::size_t out_len = x.size() + y.size() - 1;
     Eigen::VectorXf x_re = x.real(), x_im = x.imag();
     Eigen::VectorXf y_re = y.real(), y_im = y.imag();
@@ -681,8 +696,12 @@ void cfar_os_f32(std::uint8_t* detections, float* threshold,
         }
 
         if (count == 0) {
+            // No reference cells => no noise estimate. Reporting a detection
+            // here set Pfa = 1 at both ends of every run, which defeats the
+            // point of a constant-false-alarm-rate detector. A cell that cannot
+            // be tested is reported as no-detection instead.
             if (threshold) threshold[i] = 0.0f;
-            detections[i] = 1; // Default to detection if no reference
+            detections[i] = 0;
             continue;
         }
 
@@ -847,8 +866,18 @@ Eigen::VectorXf nlms_filter(const Eigen::VectorXf& input,
     return output;
 }
 
+// Precondition: clutter_subspace must have ORTHONORMAL columns. The kernel
+// computes input - sum_d <u_d, input> u_d, which equals the projector
+// (I - U U^H) applied to input only when U^H U = I. A non-orthonormal U yields
+// something that is not a projection -- orthonormalise (e.g. Householder QR,
+// neon_qr) before calling. Returns an empty vector on a dimension mismatch.
 Eigen::VectorXf projection_clutter(const Eigen::VectorXf& input,
                                    const Eigen::MatrixXf& clutter_subspace) {
+
+    // The kernel reads clutter_subspace + d*n for each column d, so the column
+    // height must equal n. Without this check a shorter subspace walked off the
+    // end of the caller's matrix.
+    if (clutter_subspace.rows() != input.size()) return Eigen::VectorXf();
 
     Eigen::VectorXf output(input.size());
     projection_clutter_f32(output.data(), input.data(),
@@ -915,12 +944,22 @@ void doppler_fft_f32(float* output_re, float* output_im,
         std::vector<float> re(fft_size), im(fft_size);
         #pragma omp for schedule(static)
         for (std::size_t r = 0; r < n_range; ++r) {
-            std::size_t p = 0;
-            for (; p < n_pulses && p < fft_size; ++p) {
-                re[p] = input_re[p * n_range + r];
-                im[p] = input_im[p * n_range + r];
+            // Fold rather than truncate. The DFT fallback below sums over ALL
+            // n_pulses, which for n_pulses > fft_size is the DFT of the
+            // time-aliased sequence: writing p = q*F + b, exp(-2pi i k p/F)
+            // = exp(-2pi i k b/F), so sum_p x[p] e(-2pi i k p/F)
+            // = sum_b (sum_q x[qF+b]) e(-2pi i k b/F). Gathering only the first
+            // fft_size pulses instead made the two paths return different
+            // answers for the same input, selected by whether fft_size happened
+            // to be a power of two. For n_pulses <= fft_size each bin is hit at
+            // most once, so this is identical to the old gather + zero-pad.
+            std::fill(re.begin(), re.end(), 0.0f);
+            std::fill(im.begin(), im.end(), 0.0f);
+            for (std::size_t p = 0; p < n_pulses; ++p) {
+                const std::size_t b = p % fft_size;
+                re[b] += input_re[p * n_range + r];
+                im[b] += input_im[p * n_range + r];
             }
-            for (; p < fft_size; ++p) { re[p] = 0.0f; im[p] = 0.0f; }
             fft_radix2_dif(re.data(), im.data(), fft_size, tw_cos.data(), tw_sin.data());
             for (std::size_t k = 0; k < fft_size; ++k) {
                 output_re[k * n_range + r] = re[k];
@@ -1132,6 +1171,12 @@ Eigen::VectorXf beamform_delay_sum(const Eigen::MatrixXf& inputs,
     std::size_t n_channels = inputs.rows();
     std::size_t n_samples = inputs.cols();
 
+    // delays[] and weights[] are indexed by channel; a short vector read past
+    // the end of the caller's buffer. weights is optional (empty => unity).
+    if (static_cast<std::size_t>(delays.size()) != n_channels) return Eigen::VectorXf();
+    if (weights.size() != 0 &&
+        static_cast<std::size_t>(weights.size()) != n_channels) return Eigen::VectorXf();
+
     // Convert from Eigen column-major to row-major layout expected by raw API
     Eigen::VectorXf in_flat(n_channels * n_samples);
     for (std::size_t ch = 0; ch < n_channels; ++ch) {
@@ -1154,6 +1199,11 @@ Eigen::VectorXcf beamform_phase(const Eigen::MatrixXcf& inputs,
 
     std::size_t n_channels = inputs.rows();
     std::size_t n_samples = inputs.cols();
+
+    // phases[] and weights[] are indexed by channel -- see beamform_delay_sum.
+    if (static_cast<std::size_t>(phases.size()) != n_channels) return Eigen::VectorXcf();
+    if (weights.size() != 0 &&
+        static_cast<std::size_t>(weights.size()) != n_channels) return Eigen::VectorXcf();
 
     Eigen::VectorXf in_re(n_channels * n_samples), in_im(n_channels * n_samples);
     Eigen::VectorXf out_re(n_samples), out_im(n_samples);

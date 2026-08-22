@@ -1009,16 +1009,25 @@ Eigen::MatrixXi cuda_cfar_2d(const Eigen::MatrixXf& power_map,
             ref_doppler, ref_range,
             pfa_factor);
 
-        // Synchronize before D2H transfer
-        cudaDeviceSynchronize();
-
-        err = cudaMemcpy(detections.data(), d_detections, n_doppler * n_range * sizeof(int), cudaMemcpyDeviceToHost);
-        if (err != cudaSuccess) {
-            std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        // A failed launch left d_detections uninitialised; copying it back
+        // returned random bytes as a detection map. Check the launch and the
+        // sync, and fall back to the CPU path on either failure.
+        cudaError_t kerr = cudaGetLastError();
+        if (kerr == cudaSuccess) kerr = cudaDeviceSynchronize();
+        if (kerr != cudaSuccess) {
+            std::cerr << "CUDA error: " << cudaGetErrorString(kerr) << std::endl;
+            cudaFree(d_power);
+            cudaFree(d_detections);
+            goto cpu_fallback_cfar2d;
         }
 
+        err = cudaMemcpy(detections.data(), d_detections, n_doppler * n_range * sizeof(int), cudaMemcpyDeviceToHost);
         cudaFree(d_power);
         cudaFree(d_detections);
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+            goto cpu_fallback_cfar2d;
+        }
         return detections;
     }
 

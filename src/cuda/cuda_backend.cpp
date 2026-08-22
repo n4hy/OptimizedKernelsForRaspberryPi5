@@ -334,10 +334,17 @@ bool CudaContext::init(int device_id) {
               << " (SM " << info.compute_capability_major << "."
               << info.compute_capability_minor << ")" << std::endl;
 
-    // Enable TF32 on Ampere+ for better performance
+    // Enable TF32 on Ampere+ for better performance.
+    // Record it in m_precision_mode too: setting the handle without updating the
+    // member left get_precision_mode() reporting FP32 while cuBLAS was actually
+    // in TF32, so a caller who checked the mode before trusting a GEMM was told
+    // it had full FP32 and silently got ~2e-4 relative error instead of ~2e-7.
     if (info.tf32_support) {
         cublasSetMathMode(m_cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH);
+        m_precision_mode = PrecisionMode::TF32;
         std::cout << "  TF32 Tensor Core math enabled" << std::endl;
+    } else {
+        m_precision_mode = PrecisionMode::FP32;
     }
 
     m_initialized = true;

@@ -160,9 +160,11 @@ static bool validate_iir_params(float fc, float fs, float Q, BiquadCoeffs& fallb
     return true;
 }
 
-BiquadCoeffs neon_biquad_lowpass(float fc, float fs, float Q) {
+BiquadCoeffs neon_biquad_lowpass(float fc, float fs, float Q, bool* ok) {
     BiquadCoeffs c;
+    if (ok) *ok = true;
     if (!validate_iir_params(fc, fs, Q, c)) {
+        if (ok) *ok = false;
         return c;  // Return unity pass-through on invalid params
     }
 
@@ -182,9 +184,11 @@ BiquadCoeffs neon_biquad_lowpass(float fc, float fs, float Q) {
     return c;
 }
 
-BiquadCoeffs neon_biquad_highpass(float fc, float fs, float Q) {
+BiquadCoeffs neon_biquad_highpass(float fc, float fs, float Q, bool* ok) {
     BiquadCoeffs c;
+    if (ok) *ok = true;
     if (!validate_iir_params(fc, fs, Q, c)) {
+        if (ok) *ok = false;
         return c;  // Return unity pass-through on invalid params
     }
 
@@ -204,9 +208,11 @@ BiquadCoeffs neon_biquad_highpass(float fc, float fs, float Q) {
     return c;
 }
 
-BiquadCoeffs neon_biquad_bandpass(float fc, float fs, float Q) {
+BiquadCoeffs neon_biquad_bandpass(float fc, float fs, float Q, bool* ok) {
     BiquadCoeffs c;
+    if (ok) *ok = true;
     if (!validate_iir_params(fc, fs, Q, c)) {
+        if (ok) *ok = false;
         return c;  // Return unity pass-through on invalid params
     }
 
@@ -226,9 +232,11 @@ BiquadCoeffs neon_biquad_bandpass(float fc, float fs, float Q) {
     return c;
 }
 
-BiquadCoeffs neon_biquad_notch(float fc, float fs, float Q) {
+BiquadCoeffs neon_biquad_notch(float fc, float fs, float Q, bool* ok) {
     BiquadCoeffs c;
+    if (ok) *ok = true;
     if (!validate_iir_params(fc, fs, Q, c)) {
+        if (ok) *ok = false;
         return c;  // Return unity pass-through on invalid params
     }
 

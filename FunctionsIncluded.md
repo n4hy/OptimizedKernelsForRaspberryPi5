@@ -63,6 +63,7 @@ Returns `true` if NEON acceleration was compiled in and is available.
 |----------|-------------|------------|-------------|
 | `neon_gemm_4x4_f32` | `void` | `float* C, const float* A, std::size_t lda, const float* B, std::size_t ldb, std::size_t ldc` | 4x4 GEMM microkernel: `C += A * B` |
 | `neon_gemm_blocked_f32` | `void` | `float* C, const float* A, const float* B, std::size_t M, std::size_t N, std::size_t K, std::size_t lda, std::size_t ldb, std::size_t ldc` | Cache-blocked GEMM (runtime-tuned MC/KC/NC) |
+| `neon_gemm_blocked_f64` | `void` | `double* C, const double* A, const double* B, std::size_t M, N, K, lda, ldb, ldc` | FP64 GEMM; NEON `float64x2_t` or Eigen. Not the fp32 8×8 microkernel |
 
 **Cache Blocking Parameters** (auto-tuned per detected L2/L3 cache):
 - Cortex-A76 (Pi 5, 512KB L2 / 2MB L3): MC=128, KC=256, NC=256 (B panel sized to ~½ L2; the pre-v0.6.2 NC=512 evicted A/C every pass and was the "GEMM ran on one core" root cause)
@@ -202,6 +203,9 @@ For C/ctypes interop where complex data is in separate arrays.
 | Function | Return Type | Parameters | Description |
 |----------|-------------|------------|-------------|
 | `neon_complex_mul_f32` | `void` | `float* out_re, float* out_im, const float* a_re, const float* a_im, const float* b_re, const float* b_im, std::size_t n` | Complex multiply: `out = a * b` |
+| `neon_complex_mul_f64` | `void` | `double* out_re, double* out_im, const double* a_re, const double* a_im, const double* b_re, const double* b_im, std::size_t n` | Complex-f64 multiply (`float64x2_t` or scalar) |
+| `neon_complex_dot_f64` | `void` | `double* out_re, double* out_im, ...` | Complex-f64 dot: `conj(a)·b` |
+| `neon_complex_magnitude_f64` | `void` | `double* out, const double* re, const double* im, std::size_t n` | `hypot(re, im)` |
 | `neon_complex_conj_mul_f32` | `void` | `float* out_re, float* out_im, const float* a_re, const float* a_im, const float* b_re, const float* b_im, std::size_t n` | Complex conjugate multiply: `out = a * conj(b)` |
 | `neon_complex_dot_f32` | `void` | `float* out_re, float* out_im, const float* a_re, const float* a_im, const float* b_re, const float* b_im, std::size_t n` | Complex dot product: `sum(a * conj(b))` |
 | `neon_complex_magnitude_f32` | `void` | `float* out, const float* re, const float* im, std::size_t n` | Magnitude: `sqrt(re^2 + im^2)` |
@@ -251,11 +255,13 @@ High-level C++ interface using Eigen types.
 
 | Function | Return Type | Parameters | Description |
 |----------|-------------|------------|-------------|
-| `neon_gemm` | `Eigen::MatrixXf` | `const Eigen::MatrixXf& A, const Eigen::MatrixXf& B` | Matrix multiply: `A * B` |
+| `neon_gemm` | `Eigen::MatrixXf` | `const Eigen::MatrixXf& A, const Eigen::MatrixXf& B` | Matrix multiply: `A * B` (fp32 blocked path) |
+| `neon_gemm` | `Eigen::MatrixXd` | `const Eigen::MatrixXd& A, const Eigen::MatrixXd& B` | FP64 GEMM (`neon_fp64.cpp`; not the fp32 8×8 kernel) |
 | `neon_gemm_blocked` | `Eigen::MatrixXf` | `const Eigen::MatrixXf& A, const Eigen::MatrixXf& B` | Optimized blocked GEMM |
 | `neon_mat_scale` | `Eigen::MatrixXf` | `const Eigen::MatrixXf& A, float s` | Scalar multiply: `A * s` |
 | `neon_mat_transpose` | `Eigen::MatrixXf` | `const Eigen::MatrixXf& A` | Matrix transpose |
 | `neon_mat_vec_mul` | `Eigen::VectorXf` | `const Eigen::MatrixXf& A, const Eigen::VectorXf& v` | Matrix-vector multiply: `A * v` |
+| `neon_mat_vec_mul` | `Eigen::VectorXd` | `const Eigen::MatrixXd& A, const Eigen::VectorXd& v` | FP64 GEMV |
 
 ---
 
@@ -264,10 +270,15 @@ High-level C++ interface using Eigen types.
 | Function | Return Type | Parameters | Description |
 |----------|-------------|------------|-------------|
 | `neon_complex_mul` | `Eigen::VectorXcf` | `const Eigen::VectorXcf& a, const Eigen::VectorXcf& b` | Complex multiply |
+| `neon_complex_mul` | `Eigen::VectorXcd` | `const Eigen::VectorXcd& a, const Eigen::VectorXcd& b` | Complex-f64 elementwise multiply |
 | `neon_complex_conj_mul` | `Eigen::VectorXcf` | `const Eigen::VectorXcf& a, const Eigen::VectorXcf& b` | Complex conjugate multiply |
 | `neon_complex_dot` | `std::complex<float>` | `const Eigen::VectorXcf& a, const Eigen::VectorXcf& b` | Complex dot product |
+| `neon_complex_dot` | `std::complex<double>` | `const Eigen::VectorXcd& a, const Eigen::VectorXcd& b` | `conj(a)·b` (matches Eigen `a.dot(b)`) |
 | `neon_complex_magnitude` | `Eigen::VectorXf` | `const Eigen::VectorXcf& a` | Magnitude of complex vector |
+| `neon_complex_magnitude` | `Eigen::VectorXd` | `const Eigen::VectorXcd& a` | Magnitude (`hypot`) |
 | `neon_complex_phase` | `Eigen::VectorXf` | `const Eigen::VectorXcf& a` | Phase of complex vector |
+| `neon_complex_gemm` | `Eigen::MatrixXcf` | `const Eigen::MatrixXcf& A, const Eigen::MatrixXcf& B` | Eigen `A * B` (no NEON microkernel) |
+| `neon_complex_gemm` | `Eigen::MatrixXcd` | `const Eigen::MatrixXcd& A, const Eigen::MatrixXcd& B` | Eigen `A * B` (no NEON microkernel) |
 
 ---
 
@@ -320,13 +331,16 @@ Column-major layout. All operations are in-place unless noted. NEON-vectorized A
 | Function | Return Type | Parameters | Description |
 |----------|-------------|------------|-------------|
 | `neon_cholesky` | `Eigen::MatrixXf` | `const Eigen::MatrixXf& A` | Cholesky: returns L (empty on failure) |
+| `neon_cholesky` | `Eigen::MatrixXd` | `const Eigen::MatrixXd& A` | FP64 Cholesky via Eigen LLT |
 | `neon_lu` | `pair<MatrixXf, VectorXi>` | `const Eigen::MatrixXf& A` | LU: returns (LU combined, pivot vector) |
 | `neon_qr` | `pair<MatrixXf, MatrixXf>` | `const Eigen::MatrixXf& A` | QR: returns (Q, R) |
 | `neon_trsv_lower` | `Eigen::VectorXf` | `const Eigen::MatrixXf& L, const Eigen::VectorXf& b` | Solve L*x = b |
 | `neon_trsv_upper` | `Eigen::VectorXf` | `const Eigen::MatrixXf& U, const Eigen::VectorXf& b` | Solve U*x = b |
 | `neon_solve` | `Eigen::VectorXf` | `const Eigen::MatrixXf& A, const Eigen::VectorXf& b` | General solve A*x = b |
 | `neon_solve_spd` | `Eigen::VectorXf` | `const Eigen::MatrixXf& A, const Eigen::VectorXf& b` | SPD solve A*x = b |
+| `neon_solve_spd` | `Eigen::VectorXd` | `const Eigen::MatrixXd& A, const Eigen::VectorXd& b` | FP64 SPD solve via Eigen LLT |
 | `neon_inverse` | `Eigen::MatrixXf` | `const Eigen::MatrixXf& A` | Matrix inverse (empty on failure) |
+| `neon_inverse` | `Eigen::MatrixXd` | `const Eigen::MatrixXd& A` | FP64 inverse via Eigen FullPivLU |
 
 ---
 
@@ -511,7 +525,13 @@ class UnifiedBuffer {
 
 | Function | Return Type | Parameters | Description |
 |----------|-------------|------------|-------------|
-| `cuda_mat_mul_f32` | `void` | `float* C, const float* A, const float* B, int M, int N, int K, bool transA, bool transB` | GEMM: `C = A * B` |
+| `cuda_mat_mul_f32` | `void` | `float* C, const float* A, const float* B, int M, int N, int K, bool transA, bool transB` | GEMM: `C = A * B` (`cublasSgemm`) |
+| `cuda_mat_mul_f64` | `void` | `double* C, const double* A, const double* B, int M, int N, int K, bool transA, bool transB` | GEMM: `C = A * B` (`cublasDgemm`) |
+| `cuda_mat_vec_mul_f64` | `void` | `double* out, const double* A, const double* x, int M, int N` | GEMV (`cublasDgemv`) |
+| `cuda_mat_mul` | `Eigen::MatrixXd` | `const Eigen::MatrixXd& A, const Eigen::MatrixXd& B` | Eigen wrapper around `cublasDgemm` |
+| `cuda_mat_mul` | `Eigen::MatrixXcf` | `const Eigen::MatrixXcf& A, const Eigen::MatrixXcf& B` | Eigen wrapper around `cublasCgemm` |
+| `cuda_mat_mul` | `Eigen::MatrixXcd` | `const Eigen::MatrixXcd& A, const Eigen::MatrixXcd& B` | Eigen wrapper around `cublasZgemm` |
+| `cuda_mat_vec_mul` | `Eigen::VectorXd` | `const Eigen::MatrixXd& A, const Eigen::VectorXd& x` | Eigen wrapper around `cublasDgemv` |
 | `cuda_mat_add_f32` | `void` | `float* C, const float* A, const float* B, int M, int N` | Matrix addition |
 | `cuda_mat_scale_f32` | `void` | `float* out, const float* A, float scalar, int M, int N` | Scalar multiply |
 | `cuda_mat_transpose_f32` | `void` | `float* out, const float* A, int M, int N` | Transpose |

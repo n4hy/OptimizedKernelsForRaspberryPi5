@@ -67,9 +67,12 @@
  * ---------------------------------------------------------------------------
  *    Thin C wrappers around cuBLAS routines with column-major layout:
  *      - cuda_mat_mul_f32:     cublasSgemm  (C = alpha*op(A)*op(B) + beta*C)
+ *      - cuda_mat_mul_f64:     cublasDgemm  (double GEMM)
+ *      - cuda_mat_mul(MatrixXcf/Xcd): cublasCgemm / cublasZgemm
  *      - cuda_vec_dot_f32:     cublasSdot   (scalar dot product)
  *      - cuda_vec_norm_f32:    cublasSnrm2  (L2 norm)
  *      - cuda_mat_vec_mul_f32: cublasSgemv  (y = alpha*A*x + beta*y)
+ *      - cuda_mat_vec_mul_f64: cublasDgemv
  *
  * ---------------------------------------------------------------------------
  * 6. CUB Parallel Reductions
@@ -534,16 +537,19 @@ void cuda_vec_add_f32(float* out, const float* a, const float* b, size_t n) {
             reinterpret_cast<const float4*>(a),
             reinterpret_cast<const float4*>(b),
             n4);
+        CUDA_KERNEL_CHECK();
 
         // Handle remainder
         size_t remainder = n % 4;
         if (remainder > 0) {
             kernel_vec_add_f32<<<1, remainder>>>(
                 out + n4 * 4, a + n4 * 4, b + n4 * 4, remainder);
+            CUDA_KERNEL_CHECK();
         }
     } else {
         int blocks = div_ceil(n, BLOCK_SIZE);
         kernel_vec_add_f32<<<blocks, BLOCK_SIZE>>>(out, a, b, n);
+        CUDA_KERNEL_CHECK();
     }
 #endif
 }
@@ -552,6 +558,7 @@ void cuda_vec_mul_f32(float* out, const float* a, const float* b, size_t n) {
 #ifdef OPTMATH_USE_CUDA
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_vec_mul_f32<<<blocks, BLOCK_SIZE>>>(out, a, b, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -559,6 +566,7 @@ void cuda_vec_scale_f32(float* out, const float* a, float scalar, size_t n) {
 #ifdef OPTMATH_USE_CUDA
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_vec_scale_f32<<<blocks, BLOCK_SIZE>>>(out, a, scalar, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -719,6 +727,7 @@ void cuda_vec_abs_f32(float* out, const float* a, size_t n) {
 #ifdef OPTMATH_USE_CUDA
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_vec_abs_f32<<<blocks, BLOCK_SIZE>>>(out, a, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -726,6 +735,7 @@ void cuda_vec_sqrt_f32(float* out, const float* a, size_t n) {
 #ifdef OPTMATH_USE_CUDA
     int blocks = div_ceil(n, BLOCK_SIZE);
     kernel_vec_sqrt_f32<<<blocks, BLOCK_SIZE>>>(out, a, n);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -1499,6 +1509,7 @@ void cuda_mat_vec_mul_f32(float* out, const float* A, const float* x, int M, int
 
 // Eigen wrappers
 Eigen::MatrixXf cuda_mat_mul(const Eigen::MatrixXf& A, const Eigen::MatrixXf& B) {
+    if (A.cols() != B.rows()) return Eigen::MatrixXf();
     int M = A.rows();
     int K = A.cols();
     int N = B.cols();
@@ -1541,6 +1552,215 @@ Eigen::MatrixXf cuda_mat_mul(const Eigen::MatrixXf& A, const Eigen::MatrixXf& B)
     C = A * B;
 #endif
 
+    return C;
+}
+
+// Returns true only if the GEMM actually ran. A bare `return` on an
+// uninitialised context left C untouched while the caller went on to copy it
+// back, handing the user a matrix of uninitialised device memory with no error.
+bool cuda_mat_mul_f64(double* C, const double* A, const double* B,
+                      int M, int N, int K, bool transA, bool transB) {
+#ifdef OPTMATH_USE_CUDA
+    CudaContext& ctx = CudaContext::get();
+    if (!ctx.is_initialized()) return false;
+    double alpha = 1.0, beta = 0.0;
+    cublasOperation_t opA = transA ? CUBLAS_OP_T : CUBLAS_OP_N;
+    cublasOperation_t opB = transB ? CUBLAS_OP_T : CUBLAS_OP_N;
+    int lda = transA ? K : M;
+    int ldb = transB ? N : K;
+    cublasStatus_t st = cublasDgemm(ctx.cublas(), opA, opB, M, N, K,
+                                    &alpha, A, lda, B, ldb, &beta, C, M);
+    if (st != CUBLAS_STATUS_SUCCESS) {
+        std::cerr << "cublasDgemm failed (status " << static_cast<int>(st) << ")\n";
+        return false;
+    }
+    return true;
+#else
+    (void)C; (void)A; (void)B; (void)M; (void)N; (void)K; (void)transA; (void)transB;
+    return false;
+#endif
+}
+
+bool cuda_mat_vec_mul_f64(double* out, const double* A, const double* x, int M, int N) {
+#ifdef OPTMATH_USE_CUDA
+    CudaContext& ctx = CudaContext::get();
+    if (!ctx.is_initialized()) return false;
+    double alpha = 1.0, beta = 0.0;
+    cublasStatus_t st = cublasDgemv(ctx.cublas(), CUBLAS_OP_N, M, N,
+                                    &alpha, A, M, x, 1, &beta, out, 1);
+    if (st != CUBLAS_STATUS_SUCCESS) {
+        std::cerr << "cublasDgemv failed (status " << static_cast<int>(st) << ")\n";
+        return false;
+    }
+    return true;
+#else
+    (void)out; (void)A; (void)x; (void)M; (void)N;
+    return false;
+#endif
+}
+
+Eigen::MatrixXd cuda_mat_mul(const Eigen::MatrixXd& A, const Eigen::MatrixXd& B) {
+    // Without this the H2D copy below reads sizeof(double)*K*N bytes out of a
+    // buffer that only holds B.rows()*N -- a heap over-read whenever
+    // A.cols() > B.rows(). Matches neon_gemm, which returns an empty matrix.
+    if (A.cols() != B.rows()) return Eigen::MatrixXd();
+    const int M = static_cast<int>(A.rows());
+    const int K = static_cast<int>(A.cols());
+    const int N = static_cast<int>(B.cols());
+    Eigen::MatrixXd C(M, N);
+#ifdef OPTMATH_USE_CUDA
+    if (!CudaContext::get().is_initialized() && !CudaContext::get().init()) {
+        C.noalias() = A * B;
+        return C;
+    }
+    double *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
+    auto cleanup = [&]() {
+        if (d_A) cudaFree(d_A);
+        if (d_B) cudaFree(d_B);
+        if (d_C) cudaFree(d_C);
+    };
+    if (cudaMalloc(&d_A, sizeof(double) * M * K) != cudaSuccess ||
+        cudaMalloc(&d_B, sizeof(double) * K * N) != cudaSuccess ||
+        cudaMalloc(&d_C, sizeof(double) * M * N) != cudaSuccess) {
+        cleanup();
+        C = A * B;
+        return C;
+    }
+    if (cudaMemcpy(d_A, A.data(), sizeof(double) * M * K, cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(d_B, B.data(), sizeof(double) * K * N, cudaMemcpyHostToDevice) != cudaSuccess) {
+        cleanup();
+        C = A * B;
+        return C;
+    }
+    if (!cuda_mat_mul_f64(d_C, d_A, d_B, M, N, K) ||
+        cudaMemcpy(C.data(), d_C, sizeof(double) * M * N, cudaMemcpyDeviceToHost) != cudaSuccess)
+        C.noalias() = A * B;
+    cleanup();
+#else
+    C = A * B;
+#endif
+    return C;
+}
+
+Eigen::VectorXd cuda_mat_vec_mul(const Eigen::MatrixXd& A, const Eigen::VectorXd& x) {
+    if (A.cols() != x.size()) return Eigen::VectorXd();
+    const int M = static_cast<int>(A.rows());
+    const int N = static_cast<int>(A.cols());
+    Eigen::VectorXd y(M);
+#ifdef OPTMATH_USE_CUDA
+    if (!CudaContext::get().is_initialized() && !CudaContext::get().init())
+        return A * x;
+    double *d_A = nullptr, *d_x = nullptr, *d_y = nullptr;
+    auto cleanup = [&]() {
+        if (d_A) cudaFree(d_A);
+        if (d_x) cudaFree(d_x);
+        if (d_y) cudaFree(d_y);
+    };
+    if (cudaMalloc(&d_A, sizeof(double) * M * N) != cudaSuccess ||
+        cudaMalloc(&d_x, sizeof(double) * N) != cudaSuccess ||
+        cudaMalloc(&d_y, sizeof(double) * M) != cudaSuccess) {
+        cleanup();
+        return A * x;
+    }
+    if (cudaMemcpy(d_A, A.data(), sizeof(double) * M * N, cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(d_x, x.data(), sizeof(double) * N, cudaMemcpyHostToDevice) != cudaSuccess ||
+        !cuda_mat_vec_mul_f64(d_y, d_A, d_x, M, N) ||
+        cudaMemcpy(y.data(), d_y, sizeof(double) * M, cudaMemcpyDeviceToHost) != cudaSuccess) {
+        cleanup();
+        return A * x;
+    }
+    cleanup();
+#else
+    y.noalias() = A * x;
+#endif
+    return y;
+}
+
+Eigen::MatrixXcf cuda_mat_mul(const Eigen::MatrixXcf& A, const Eigen::MatrixXcf& B) {
+    if (A.cols() != B.rows()) return Eigen::MatrixXcf();
+    const int M = static_cast<int>(A.rows());
+    const int K = static_cast<int>(A.cols());
+    const int N = static_cast<int>(B.cols());
+    Eigen::MatrixXcf C(M, N);
+#ifdef OPTMATH_USE_CUDA
+    if (!CudaContext::get().is_initialized() && !CudaContext::get().init()) {
+        C.noalias() = A * B;
+        return C;
+    }
+    cuComplex *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
+    auto cleanup = [&]() {
+        if (d_A) cudaFree(d_A);
+        if (d_B) cudaFree(d_B);
+        if (d_C) cudaFree(d_C);
+    };
+    const size_t sa = sizeof(cuComplex) * M * K;
+    const size_t sb = sizeof(cuComplex) * K * N;
+    const size_t sc = sizeof(cuComplex) * M * N;
+    if (cudaMalloc(&d_A, sa) != cudaSuccess || cudaMalloc(&d_B, sb) != cudaSuccess ||
+        cudaMalloc(&d_C, sc) != cudaSuccess) {
+        cleanup();
+        C = A * B;
+        return C;
+    }
+    cuComplex alpha{1.f, 0.f}, beta{0.f, 0.f};
+    if (cudaMemcpy(d_A, A.data(), sa, cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(d_B, B.data(), sb, cudaMemcpyHostToDevice) != cudaSuccess ||
+        cublasCgemm(CudaContext::get().cublas(), CUBLAS_OP_N, CUBLAS_OP_N,
+                    M, N, K, &alpha, d_A, M, d_B, K, &beta, d_C, M)
+            != CUBLAS_STATUS_SUCCESS ||
+        cudaMemcpy(C.data(), d_C, sc, cudaMemcpyDeviceToHost) != cudaSuccess) {
+        cleanup();
+        C.noalias() = A * B;
+        return C;
+    }
+    cleanup();
+#else
+    C.noalias() = A * B;
+#endif
+    return C;
+}
+
+Eigen::MatrixXcd cuda_mat_mul(const Eigen::MatrixXcd& A, const Eigen::MatrixXcd& B) {
+    if (A.cols() != B.rows()) return Eigen::MatrixXcd();
+    const int M = static_cast<int>(A.rows());
+    const int K = static_cast<int>(A.cols());
+    const int N = static_cast<int>(B.cols());
+    Eigen::MatrixXcd C(M, N);
+#ifdef OPTMATH_USE_CUDA
+    if (!CudaContext::get().is_initialized() && !CudaContext::get().init()) {
+        C.noalias() = A * B;
+        return C;
+    }
+    cuDoubleComplex *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
+    auto cleanup = [&]() {
+        if (d_A) cudaFree(d_A);
+        if (d_B) cudaFree(d_B);
+        if (d_C) cudaFree(d_C);
+    };
+    const size_t sa = sizeof(cuDoubleComplex) * M * K;
+    const size_t sb = sizeof(cuDoubleComplex) * K * N;
+    const size_t sc = sizeof(cuDoubleComplex) * M * N;
+    if (cudaMalloc(&d_A, sa) != cudaSuccess || cudaMalloc(&d_B, sb) != cudaSuccess ||
+        cudaMalloc(&d_C, sc) != cudaSuccess) {
+        cleanup();
+        C = A * B;
+        return C;
+    }
+    cuDoubleComplex alpha{1.0, 0.0}, beta{0.0, 0.0};
+    if (cudaMemcpy(d_A, A.data(), sa, cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(d_B, B.data(), sb, cudaMemcpyHostToDevice) != cudaSuccess ||
+        cublasZgemm(CudaContext::get().cublas(), CUBLAS_OP_N, CUBLAS_OP_N,
+                    M, N, K, &alpha, d_A, M, d_B, K, &beta, d_C, M)
+            != CUBLAS_STATUS_SUCCESS ||
+        cudaMemcpy(C.data(), d_C, sc, cudaMemcpyDeviceToHost) != cudaSuccess) {
+        cleanup();
+        C.noalias() = A * B;
+        return C;
+    }
+    cleanup();
+#else
+    C.noalias() = A * B;
+#endif
     return C;
 }
 
@@ -1669,6 +1889,7 @@ Eigen::MatrixXf cuda_mat_transpose(const Eigen::MatrixXf& A) {
 }
 
 Eigen::VectorXf cuda_mat_vec_mul(const Eigen::MatrixXf& A, const Eigen::VectorXf& x) {
+    if (A.cols() != x.size()) return Eigen::VectorXf();
     int M = A.rows();
     int N = A.cols();
     Eigen::VectorXf y(M);

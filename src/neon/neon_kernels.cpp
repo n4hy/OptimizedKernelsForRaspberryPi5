@@ -252,9 +252,29 @@ void neon_safe_div_f32(float* out, const float* a, const float* b, std::size_t n
 }
 
 float neon_norm_f32(const float* a, std::size_t n) {
-    // Norm = sqrt(dot(a, a))
-    float dot = neon_dot_f32(a, a, n);
-    return std::sqrt(dot);
+    // Fast path: sqrt(dot(a,a)). The sum of squares overflows to +Inf once
+    // ||a|| exceeds ~1.8e19 and flushes to zero once ||a|| falls below ~1e-19,
+    // even though the norm itself is perfectly representable in both cases.
+    // Detect either and redo the reduction with explicit scaling (BLAS snrm2
+    // style), so the common case keeps the single-pass NEON dot.
+    const float ss = neon_dot_f32(a, a, n);
+    if (ss > 0.0f && std::isfinite(ss)) return std::sqrt(ss);
+    if (n == 0) return 0.0f;
+
+    float scale = 0.0f;
+    for (std::size_t i = 0; i < n; ++i) {
+        const float ai = std::fabs(a[i]);
+        if (ai > scale) scale = ai;
+    }
+    if (scale == 0.0f || !std::isfinite(scale)) return scale;  // all-zero, or Inf/NaN input
+
+    const double inv = 1.0 / static_cast<double>(scale);
+    double acc = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const double t = static_cast<double>(a[i]) * inv;
+        acc += t * t;
+    }
+    return static_cast<float>(static_cast<double>(scale) * std::sqrt(acc));
 }
 
 float neon_reduce_sum_f32(const float* a, std::size_t n) {
@@ -524,8 +544,16 @@ void neon_fast_sin_f32(float* out, const float* in, std::size_t n) {
     // Sine approximation using Chebyshev polynomial
     // Range reduction to [-pi, pi], then polynomial
 
-    const float pi = 3.14159265358979323846f;
     const float inv_pi = 0.31830988618379067154f;
+    // pi split into four parts whose sum equals pi to 2.4e-18 (the previous
+    // PI_C was wrong in the 5th digit, leaving a 8.5e-12 residual that grew as
+    // 8.5e-12*k). PI_A and PI_B carry 16 and 15 trailing zero mantissa bits, so
+    // k*PI_A and k*PI_B are exact for |k| < 2^15, i.e. |x| < ~1.0e5; beyond that
+    // the reduction degrades and a Payne-Hanek path would be required.
+    const float PI_A = 3.140625f;
+    const float PI_B = 0.0009670257568359375f;
+    const float PI_C = 6.2771141529083251953e-7f;
+    const float PI_D = 1.2154201256553420762e-10f;
 
     // Chebyshev coefficients for sin(x*pi/2) on [-1, 1]
     // sin(x) = x * (c1 + x^2 * (c3 + x^2 * (c5 + x^2 * c7)))
@@ -536,7 +564,8 @@ void neon_fast_sin_f32(float* out, const float* in, std::size_t n) {
     const float c9 = 0.00000275573189712526f;
 
 #ifdef OPTMATH_USE_NEON
-    float32x4_t vpi = vdupq_n_f32(pi);
+    float32x4_t vPI_A = vdupq_n_f32(PI_A), vPI_B = vdupq_n_f32(PI_B);
+    float32x4_t vPI_C = vdupq_n_f32(PI_C), vPI_D = vdupq_n_f32(PI_D);
     float32x4_t vinv_pi = vdupq_n_f32(inv_pi);
     float32x4_t vc1 = vdupq_n_f32(c1);
     float32x4_t vc3 = vdupq_n_f32(c3);
@@ -548,9 +577,12 @@ void neon_fast_sin_f32(float* out, const float* in, std::size_t n) {
     for (; i + 3 < n; i += 4) {
         float32x4_t x = vld1q_f32(in + i);
 
-        // Range reduction: x = x - round(x / pi) * pi
+        // Cody-Waite: x - k*PI_A - k*PI_B - k*PI_C - k*PI_D
         float32x4_t k = vrndnq_f32(vmulq_f32(x, vinv_pi));
-        x = vfmsq_f32(x, k, vpi);
+        x = vfmsq_f32(x, k, vPI_A);
+        x = vfmsq_f32(x, k, vPI_B);
+        x = vfmsq_f32(x, k, vPI_C);
+        x = vfmsq_f32(x, k, vPI_D);
 
         // sin(x) = x * (c1 + x^2*(c3 + x^2*(c5 + x^2*(c7 + x^2*c9))))
         float32x4_t x2 = vmulq_f32(x, x);
@@ -572,7 +604,7 @@ void neon_fast_sin_f32(float* out, const float* in, std::size_t n) {
     for (; i < n; ++i) {
         float x = in[i];
         float k = std::round(x * inv_pi);
-        x = x - k * pi;
+        x = ((( x - k * PI_A) - k * PI_B) - k * PI_C) - k * PI_D;
 
         float x2 = x * x;
         float p = c9;
@@ -593,10 +625,32 @@ void neon_fast_sin_f32(float* out, const float* in, std::size_t n) {
 }
 
 void neon_fast_cos_f32(float* out, const float* in, std::size_t n) {
-    // cos(x) = sin(x + pi/2) — inline the sin polynomial to avoid heap allocation
-    const float pi = 3.14159265358979323846f;
-    const float half_pi = 1.57079632679489661923f;
+    // cos(x) reduced against ODD MULTIPLES OF pi/2, not via sin(x + pi/2).
+    //
+    // Forming `x + pi/2` in float first rounds the sum to one ulp of x, and that
+    // error passes straight through the reduction into the result: at |x| ~ 1e4
+    // ulp(x) is 9.8e-4, giving a measured max error of 4.8e-4 -- 130x the
+    // polynomial floor, and past the 1e-5 tolerance this function is tested to.
+    // No amount of care in the pi split can recover it, because the damage is
+    // done before the reduction starts.
+    //
+    // Instead write x = r + q*(pi/2) with q odd, so no pre-add is needed:
+    //   m = round(x/pi - 1/2),  q = 2m + 1,  r = x - q*(pi/2)
+    // Then |r| <= pi/2, and with q = 2m+1,
+    //   cos(x) = cos(r + m*pi + pi/2) = (-1)^m * cos(r + pi/2)
+    //          = (-1)^m * (-sin r) = (-1)^(m+1) * sin(r),
+    // i.e. negate the polynomial exactly when m is even.
+    //
+    // Halving each pi part is exact (it only decrements the exponent), so the
+    // half constants keep the trailing zero mantissa bits that make q*HA and
+    // q*HB exact for |q| < 2^15 -- the same |x| < ~1.0e5 range as the sine.
     const float inv_pi = 0.31830988618379067154f;
+    const float PI_A = 3.140625f;
+    const float PI_B = 0.0009670257568359375f;
+    const float PI_C = 6.2771141529083251953e-7f;
+    const float PI_D = 1.2154201256553420762e-10f;
+    const float HA = PI_A * 0.5f, HB = PI_B * 0.5f;
+    const float HC = PI_C * 0.5f, HD = PI_D * 0.5f;
 
     const float c1 = 1.0f;
     const float c3 = -0.16666667163372039795f;
@@ -605,9 +659,12 @@ void neon_fast_cos_f32(float* out, const float* in, std::size_t n) {
     const float c9 = 0.00000275573189712526f;
 
 #ifdef OPTMATH_USE_NEON
-    float32x4_t vpi = vdupq_n_f32(pi);
-    float32x4_t vhalf_pi = vdupq_n_f32(half_pi);
+    float32x4_t vHA = vdupq_n_f32(HA), vHB = vdupq_n_f32(HB);
+    float32x4_t vHC = vdupq_n_f32(HC), vHD = vdupq_n_f32(HD);
     float32x4_t vinv_pi = vdupq_n_f32(inv_pi);
+    float32x4_t vhalf = vdupq_n_f32(0.5f);
+    float32x4_t vone = vdupq_n_f32(1.0f);
+    float32x4_t vtwo = vdupq_n_f32(2.0f);
     float32x4_t vc1 = vdupq_n_f32(c1);
     float32x4_t vc3 = vdupq_n_f32(c3);
     float32x4_t vc5 = vdupq_n_f32(c5);
@@ -616,10 +673,16 @@ void neon_fast_cos_f32(float* out, const float* in, std::size_t n) {
 
     size_t i = 0;
     for (; i + 3 < n; i += 4) {
-        float32x4_t x = vaddq_f32(vld1q_f32(in + i), vhalf_pi);
+        float32x4_t xin = vld1q_f32(in + i);
 
-        float32x4_t k = vrndnq_f32(vmulq_f32(x, vinv_pi));
-        x = vfmsq_f32(x, k, vpi);
+        // m = round(x/pi - 1/2); q = 2m + 1 (always odd)
+        float32x4_t m = vrndnq_f32(vsubq_f32(vmulq_f32(xin, vinv_pi), vhalf));
+        float32x4_t q = vfmaq_f32(vone, m, vtwo);
+
+        float32x4_t x = vfmsq_f32(xin, q, vHA);
+        x = vfmsq_f32(x, q, vHB);
+        x = vfmsq_f32(x, q, vHC);
+        x = vfmsq_f32(x, q, vHD);
 
         float32x4_t x2 = vmulq_f32(x, x);
         float32x4_t p = vfmaq_f32(vc7, vc9, x2);
@@ -628,17 +691,19 @@ void neon_fast_cos_f32(float* out, const float* in, std::size_t n) {
         p = vfmaq_f32(vc1, p, x2);
         p = vmulq_f32(p, x);
 
-        int32x4_t ki = vcvtq_s32_f32(k);
-        uint32x4_t odd = vtstq_s32(ki, vdupq_n_s32(1));
-        p = vbslq_f32(odd, vnegq_f32(p), p);
+        // cos(x) = (-1)^(m+1) sin(r): keep p when m is odd, negate when even.
+        int32x4_t mi = vcvtq_s32_f32(m);
+        uint32x4_t odd = vtstq_s32(mi, vdupq_n_s32(1));
+        p = vbslq_f32(odd, p, vnegq_f32(p));
 
         vst1q_f32(out + i, p);
     }
 
     for (; i < n; ++i) {
-        float x = in[i] + half_pi;
-        float k = std::round(x * inv_pi);
-        x = x - k * pi;
+        float xin = in[i];
+        float m = std::round(xin * inv_pi - 0.5f);
+        float q = 2.0f * m + 1.0f;
+        float x = (((xin - q * HA) - q * HB) - q * HC) - q * HD;
         float x2 = x * x;
         float p = c9;
         p = c7 + p * x2;
@@ -646,7 +711,7 @@ void neon_fast_cos_f32(float* out, const float* in, std::size_t n) {
         p = c3 + p * x2;
         p = c1 + p * x2;
         p = p * x;
-        if ((int64_t)k & 1) p = -p;
+        if (!((int64_t)m & 1)) p = -p;
         out[i] = p;
     }
 #else
@@ -661,7 +726,6 @@ void neon_fast_sigmoid_f32(float* out, const float* in, std::size_t n) {
     // Single-pass: inline exp(-x) computation to avoid heap allocations
 
     const float log2e = 1.44269504088896341f;
-    const float ln2 = 0.693147180559945309f;
     const float c0 = 1.0f, c1 = 0.693147182464599609f;
     const float c2 = 0.240226507186889648f, c3 = 0.055504187941551208f;
     const float c4 = 0.009618341922760010f, c5 = 0.001333355903625488f;
@@ -670,7 +734,6 @@ void neon_fast_sigmoid_f32(float* out, const float* in, std::size_t n) {
 #ifdef OPTMATH_USE_NEON
     float32x4_t vone = vdupq_n_f32(1.0f);
     float32x4_t vlog2e = vdupq_n_f32(log2e);
-    float32x4_t vln2 = vdupq_n_f32(ln2);
     float32x4_t vc0 = vdupq_n_f32(c0), vc1 = vdupq_n_f32(c1);
     float32x4_t vc2 = vdupq_n_f32(c2), vc3 = vdupq_n_f32(c3);
     float32x4_t vc4 = vdupq_n_f32(c4), vc5 = vdupq_n_f32(c5);
@@ -741,7 +804,6 @@ void neon_fast_tanh_f32(float* out, const float* in, std::size_t n) {
     // tanh(x) = 2*sigmoid(2x) - 1, single-pass with inline exp
 
     const float log2e = 1.44269504088896341f;
-    const float ln2 = 0.693147180559945309f;
     const float c0 = 1.0f, c1 = 0.693147182464599609f;
     const float c2 = 0.240226507186889648f, c3 = 0.055504187941551208f;
     const float c4 = 0.009618341922760010f, c5 = 0.001333355903625488f;
@@ -751,7 +813,6 @@ void neon_fast_tanh_f32(float* out, const float* in, std::size_t n) {
     float32x4_t vtwo = vdupq_n_f32(2.0f);
     float32x4_t vone = vdupq_n_f32(1.0f);
     float32x4_t vlog2e = vdupq_n_f32(log2e);
-    float32x4_t vln2 = vdupq_n_f32(ln2);
     float32x4_t vc0 = vdupq_n_f32(c0), vc1 = vdupq_n_f32(c1);
     float32x4_t vc2 = vdupq_n_f32(c2), vc3 = vdupq_n_f32(c3);
     float32x4_t vc4 = vdupq_n_f32(c4), vc5 = vdupq_n_f32(c5);

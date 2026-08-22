@@ -244,7 +244,9 @@ public:
     // Precision mode for Tensor Cores
     enum class PrecisionMode {
         FP32,           // Standard single precision
-        TF32,           // TensorFloat-32 (Ampere+, 19-bit mantissa)
+        TF32,           // TensorFloat-32 (Ampere+): 19 bits TOTAL -- 1 sign,
+                        // 8 exponent, 10 explicit mantissa (11-bit significand).
+                        // NOT a 19-bit mantissa; ~1e-3 relative precision.
         FP16,           // Half precision
         FP64,           // Double precision
         MIXED_FP16_FP32 // FP16 compute, FP32 accumulate
@@ -476,6 +478,29 @@ void cuda_mat_mul_tensorcore_fp16(void* C, const void* A, const void* B,
 
 // Eigen wrappers
 Eigen::MatrixXf cuda_mat_mul(const Eigen::MatrixXf& A, const Eigen::MatrixXf& B);
+// All four return an empty matrix/vector on a dimension mismatch, and fall back
+// to the Eigen CPU product if the CUDA context, an allocation, or the cuBLAS
+// call fails -- the result is always a real product or empty, never garbage.
+//
+// PRECISION: CudaContext::init() enables CUBLAS_TF32_TENSOR_OP_MATH on Ampere+,
+// so the two SINGLE-precision entry points below run their multiplies in TF32
+// (11-bit significand), not FP32. Measured max relative error on an RTX 5090
+// with M=97, K=53, N=71: 2.6e-4 for MatrixXcf, against 2.6e-7 with
+// CUBLAS_DEFAULT_MATH. If you need full FP32 for complex work, either call
+// CudaContext::get().set_precision_mode(PrecisionMode::FP32) first or use the
+// MatrixXcd overload. The DOUBLE-precision overloads are unaffected by TF32
+// (measured 3.6e-15 / 8.2e-15).
+Eigen::MatrixXd cuda_mat_mul(const Eigen::MatrixXd& A, const Eigen::MatrixXd& B);
+Eigen::MatrixXcf cuda_mat_mul(const Eigen::MatrixXcf& A, const Eigen::MatrixXcf& B);
+Eigen::MatrixXcd cuda_mat_mul(const Eigen::MatrixXcd& A, const Eigen::MatrixXcd& B);
+Eigen::VectorXd cuda_mat_vec_mul(const Eigen::MatrixXd& A, const Eigen::VectorXd& x);
+
+// Return false if the GEMM/GEMV did not run (context down, cuBLAS error); the
+// output buffer is then untouched and must not be read back as a result.
+bool cuda_mat_mul_f64(double* C, const double* A, const double* B,
+                      int M, int N, int K,
+                      bool transA = false, bool transB = false);
+bool cuda_mat_vec_mul_f64(double* out, const double* A, const double* x, int M, int N);
 Eigen::MatrixXf cuda_mat_add(const Eigen::MatrixXf& A, const Eigen::MatrixXf& B);
 Eigen::MatrixXf cuda_mat_scale(const Eigen::MatrixXf& A, float scalar);
 Eigen::MatrixXf cuda_mat_transpose(const Eigen::MatrixXf& A);
@@ -767,7 +792,11 @@ inline Eigen::VectorXf cuda_sqrt(const Eigen::VectorXf& a) {
 
 // Matrix ops (shorthand)
 inline Eigen::MatrixXf cuda_gemm(const Eigen::MatrixXf& A, const Eigen::MatrixXf& B) { return cuda_mat_mul(A, B); }
+inline Eigen::MatrixXd cuda_gemm(const Eigen::MatrixXd& A, const Eigen::MatrixXd& B) { return cuda_mat_mul(A, B); }
+inline Eigen::MatrixXcf cuda_gemm(const Eigen::MatrixXcf& A, const Eigen::MatrixXcf& B) { return cuda_mat_mul(A, B); }
+inline Eigen::MatrixXcd cuda_gemm(const Eigen::MatrixXcd& A, const Eigen::MatrixXcd& B) { return cuda_mat_mul(A, B); }
 inline Eigen::VectorXf cuda_gemv(const Eigen::MatrixXf& A, const Eigen::VectorXf& x) { return cuda_mat_vec_mul(A, x); }
+inline Eigen::VectorXd cuda_gemv(const Eigen::MatrixXd& A, const Eigen::VectorXd& x) { return cuda_mat_vec_mul(A, x); }
 inline Eigen::MatrixXf cuda_transpose(const Eigen::MatrixXf& A) { return cuda_mat_transpose(A); }
 
 // Activation functions (Eigen wrappers)

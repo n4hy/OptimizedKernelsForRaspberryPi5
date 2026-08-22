@@ -1146,6 +1146,7 @@ void cuda_conv1d_f32(float* out, const float* signal, const float* kernel,
     kernel_conv1d_f32<<<blocks, BLOCK_SIZE>>>(out, signal, kernel,
                                                static_cast<int>(signal_len),
                                                static_cast<int>(kernel_len));
+    CUDA_KERNEL_CHECK();
 #endif
 }
 
@@ -1159,6 +1160,7 @@ void cuda_conv2d_f32(float* out, const float* image, const float* kernel,
     dim3 grid(div_ceil(out_w, 16), div_ceil(out_h, 16));
 
     kernel_conv2d_f32<<<grid, block>>>(out, image, kernel, img_h, img_w, kern_h, kern_w);
+    CUDA_KERNEL_CHECK();
 #endif
 }
 

@@ -161,10 +161,18 @@ namespace neon {
                             const BiquadCoeffs coeffs[4], BiquadState state[4]);
 
     // Biquad design helpers (Audio EQ Cookbook formulas)
-    BiquadCoeffs neon_biquad_lowpass(float fc, float fs, float Q = 0.7071067811865476f);
-    BiquadCoeffs neon_biquad_highpass(float fc, float fs, float Q = 0.7071067811865476f);
-    BiquadCoeffs neon_biquad_bandpass(float fc, float fs, float Q = 1.0f);
-    BiquadCoeffs neon_biquad_notch(float fc, float fs, float Q = 1.0f);
+    /**
+     * Biquad designs (RBJ Audio EQ Cookbook).
+     *
+     * On invalid parameters (fs <= 0, Q <= 0, or fc outside (0, fs/2)) these
+     * return a unity pass-through {b0=1, b1=b2=a1=a2=0}, which is
+     * indistinguishable from a legitimate design. Pass `ok` to tell the two
+     * apart: it is set false exactly when the parameters were rejected.
+     */
+    BiquadCoeffs neon_biquad_lowpass(float fc, float fs, float Q = 0.7071067811865476f, bool* ok = nullptr);
+    BiquadCoeffs neon_biquad_highpass(float fc, float fs, float Q = 0.7071067811865476f, bool* ok = nullptr);
+    BiquadCoeffs neon_biquad_bandpass(float fc, float fs, float Q = 1.0f, bool* ok = nullptr);
+    BiquadCoeffs neon_biquad_notch(float fc, float fs, float Q = 1.0f, bool* ok = nullptr);
 
     // =========================================================================
     // 2D Convolution (row-major layout)
@@ -227,13 +235,18 @@ namespace neon {
     void neon_fast_exp_f32(float* out, const float* in, std::size_t n);
 
     /**
-     * @brief Fast vectorized sin using Chebyshev polynomial
-     * ~1e-5 accuracy (uses range reduction to [-pi, pi])
+     * @brief Fast vectorized sin, Cody-Waite reduction + degree-9 Taylor
+     * Max absolute error ~3.7e-6, set by the polynomial, roughly flat for
+     * |x| < ~1.0e5. Beyond that the four-part pi split stops being exact and
+     * the error grows without bound; use std::sin there.
      */
     void neon_fast_sin_f32(float* out, const float* in, std::size_t n);
 
     /**
-     * @brief Fast vectorized cos using sin(x + pi/2)
+     * @brief Fast vectorized cos, reduced against odd multiples of pi/2
+     * Same ~3.7e-6 max absolute error and same |x| < ~1.0e5 valid range as
+     * neon_fast_sin_f32. (Not computed as sin(x + pi/2): forming that sum in
+     * float costs one ulp of x, which dominated the result for large |x|.)
      */
     void neon_fast_cos_f32(float* out, const float* in, std::size_t n);
 
@@ -357,16 +370,22 @@ namespace neon {
     // --- Triangular Solve (raw pointer, column-major) ---
 
     /** @brief Forward substitution: solve L*x = b (L lower triangular). b overwritten with x. */
-    void neon_trsv_lower_f32(float* b, const float* L, std::size_t n, std::size_t ldl);
+    /** @return 0 on success, or 1-based index of the zero diagonal entry. */
+    int neon_trsv_lower_f32(float* b, const float* L, std::size_t n, std::size_t ldl);
 
     /** @brief Backward substitution: solve U*x = b (U upper triangular). b overwritten with x. */
-    void neon_trsv_upper_f32(float* b, const float* U, std::size_t n, std::size_t ldu);
+    /** @return 0 on success, or 1-based index of the zero diagonal entry. */
+    int neon_trsv_upper_f32(float* b, const float* U, std::size_t n, std::size_t ldu);
 
     /** @brief Forward substitution with unit diagonal: solve L*x = b where diag(L) = 1. */
-    void neon_trsv_lower_unit_f32(float* b, const float* L, std::size_t n, std::size_t ldl);
+    /** @return Always 0. The diagonal is implicitly 1, so there is no pivot to
+     *  divide by and no singularity to report; the int return exists only to
+     *  match the other trsv entry points. */
+    int neon_trsv_lower_unit_f32(float* b, const float* L, std::size_t n, std::size_t ldl);
 
     /** @brief Solve L^T*x = b using lower triangular L. b overwritten with x. */
-    void neon_trsv_lower_trans_f32(float* b, const float* L, std::size_t n, std::size_t ldl);
+    /** @return 0 on success, or 1-based index of the zero diagonal entry. */
+    int neon_trsv_lower_trans_f32(float* b, const float* L, std::size_t n, std::size_t ldl);
 
     /** @brief Multi-RHS lower triangular solve: solve L*X = B. B overwritten with X. */
     void neon_trsm_lower_f32(float* B, const float* L, std::size_t n, std::size_t nrhs,

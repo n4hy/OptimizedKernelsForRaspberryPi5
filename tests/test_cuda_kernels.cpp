@@ -260,13 +260,212 @@ TEST_F(CudaKernelTest, MatrixGEMM) {
     Eigen::MatrixXf result = optmath::cuda::cuda_gemm(a, b);
     Eigen::MatrixXf expected = a * b;
 
-    // Note: TF32 (enabled on Ampere+) uses 19-bit mantissa vs FP32's 24-bit,
-    // providing ~0.4% relative error. Combined with k=64 accumulations,
-    // errors can compound. Use 1% relative + 5e-3 absolute tolerance.
+    // Note: CudaContext::init() enables TF32 on Ampere+, so this runs with an
+    // 11-bit significand (TF32 is 19 bits TOTAL: 1 sign + 8 exponent + 10
+    // explicit mantissa -- not a 19-bit mantissa). Measured ~2e-4 relative on
+    // an RTX 5090; with k=64 accumulations on top, use 1% relative + 5e-3 abs.
     for (int i = 0; i < m; ++i) {
         for (int j = 0; j < n; ++j) {
             EXPECT_NEAR(result(i,j), expected(i,j), std::abs(expected(i,j)) * 1e-2f + 5e-3f);
         }
+    }
+}
+
+// --- Double / complex GEMM ---------------------------------------------------
+//
+// These four entry points had no coverage at all. Dimensions are deliberately
+// non-square and not multiples of any tile size (97 x 53 x 71) so a kernel that
+// transposed an operand, or used the wrong leading dimension, cannot still
+// agree with Eigen by symmetry.
+//
+// Tolerances are set from measurement, not guessed: on an RTX 5090 these run at
+// 3.6e-15 (Dgemm), 8.2e-15 (Zgemm) and 1.1e-15 (Dgemv) max absolute error.
+// The bounds below leave ~2 decades of headroom while staying ~11 decades
+// tighter than TF32 would permit, so a silent drop to single precision or to
+// tensor-core math on the FP64 paths fails here rather than passing quietly.
+
+namespace {
+constexpr int GEMM_M = 97, GEMM_K = 53, GEMM_N = 71;
+}  // namespace
+
+TEST_F(CudaKernelTest, MatrixGEMM_F64) {
+    Eigen::MatrixXd a = Eigen::MatrixXd::Random(GEMM_M, GEMM_K);
+    Eigen::MatrixXd b = Eigen::MatrixXd::Random(GEMM_K, GEMM_N);
+
+    Eigen::MatrixXd result = optmath::cuda::cuda_gemm(a, b);
+    Eigen::MatrixXd expected = a * b;
+
+    ASSERT_EQ(result.rows(), GEMM_M);
+    ASSERT_EQ(result.cols(), GEMM_N);
+    for (int i = 0; i < GEMM_M; ++i) {
+        for (int j = 0; j < GEMM_N; ++j) {
+            EXPECT_NEAR(result(i, j), expected(i, j),
+                        std::abs(expected(i, j)) * 1e-12 + 1e-12)
+                << "at (" << i << ", " << j << ")";
+        }
+    }
+}
+
+TEST_F(CudaKernelTest, MatrixGEMV_F64) {
+    Eigen::MatrixXd a = Eigen::MatrixXd::Random(GEMM_M, GEMM_K);
+    Eigen::VectorXd x = Eigen::VectorXd::Random(GEMM_K);
+
+    Eigen::VectorXd result = optmath::cuda::cuda_gemv(a, x);
+    Eigen::VectorXd expected = a * x;
+
+    ASSERT_EQ(result.size(), GEMM_M);
+    for (int i = 0; i < GEMM_M; ++i) {
+        EXPECT_NEAR(result(i), expected(i),
+                    std::abs(expected(i)) * 1e-12 + 1e-12) << "at " << i;
+    }
+}
+
+TEST_F(CudaKernelTest, MatrixGEMM_ComplexF32) {
+    Eigen::MatrixXcf a = Eigen::MatrixXcf::Random(GEMM_M, GEMM_K);
+    Eigen::MatrixXcf b = Eigen::MatrixXcf::Random(GEMM_K, GEMM_N);
+
+    Eigen::MatrixXcf result = optmath::cuda::cuda_gemm(a, b);
+    Eigen::MatrixXcf expected = a * b;
+
+    ASSERT_EQ(result.rows(), GEMM_M);
+    ASSERT_EQ(result.cols(), GEMM_N);
+    // cublasCgemm is a SINGLE-precision path, so it inherits the context's TF32
+    // math mode just as cuda_gemm(MatrixXf) does: measured 2.6e-4 relative here
+    // against 2.6e-7 under CUBLAS_DEFAULT_MATH. Tolerance matches MatrixGEMM.
+    for (int i = 0; i < GEMM_M; ++i) {
+        for (int j = 0; j < GEMM_N; ++j) {
+            EXPECT_NEAR(result(i, j).real(), expected(i, j).real(),
+                        std::abs(expected(i, j)) * 1e-2f + 5e-3f)
+                << "real at (" << i << ", " << j << ")";
+            EXPECT_NEAR(result(i, j).imag(), expected(i, j).imag(),
+                        std::abs(expected(i, j)) * 1e-2f + 5e-3f)
+                << "imag at (" << i << ", " << j << ")";
+        }
+    }
+}
+
+TEST_F(CudaKernelTest, MatrixGEMM_ComplexF64) {
+    Eigen::MatrixXcd a = Eigen::MatrixXcd::Random(GEMM_M, GEMM_K);
+    Eigen::MatrixXcd b = Eigen::MatrixXcd::Random(GEMM_K, GEMM_N);
+
+    Eigen::MatrixXcd result = optmath::cuda::cuda_gemm(a, b);
+    Eigen::MatrixXcd expected = a * b;
+
+    ASSERT_EQ(result.rows(), GEMM_M);
+    ASSERT_EQ(result.cols(), GEMM_N);
+    for (int i = 0; i < GEMM_M; ++i) {
+        for (int j = 0; j < GEMM_N; ++j) {
+            EXPECT_NEAR(result(i, j).real(), expected(i, j).real(),
+                        std::abs(expected(i, j)) * 1e-12 + 1e-12)
+                << "real at (" << i << ", " << j << ")";
+            EXPECT_NEAR(result(i, j).imag(), expected(i, j).imag(),
+                        std::abs(expected(i, j)) * 1e-12 + 1e-12)
+                << "imag at (" << i << ", " << j << ")";
+        }
+    }
+}
+
+// A complex GEMM that dropped the cross terms (ac - bd / ad + bc) would still
+// match on operands that happen to be real or imaginary only. Multiply two
+// purely imaginary matrices: every entry of the product must be real and
+// negative-definite in sign relative to the real-operand product.
+TEST_F(CudaKernelTest, MatrixGEMM_ComplexF64_CrossTerms) {
+    Eigen::MatrixXd ar = Eigen::MatrixXd::Random(GEMM_M, GEMM_K);
+    Eigen::MatrixXd br = Eigen::MatrixXd::Random(GEMM_K, GEMM_N);
+    Eigen::MatrixXcd a = ar.cast<std::complex<double>>() * std::complex<double>(0, 1);
+    Eigen::MatrixXcd b = br.cast<std::complex<double>>() * std::complex<double>(0, 1);
+
+    Eigen::MatrixXcd result = optmath::cuda::cuda_gemm(a, b);
+    Eigen::MatrixXd expected_real = -(ar * br);  // (i*A)(i*B) = -A*B
+
+    for (int i = 0; i < GEMM_M; ++i) {
+        for (int j = 0; j < GEMM_N; ++j) {
+            EXPECT_NEAR(result(i, j).real(), expected_real(i, j),
+                        std::abs(expected_real(i, j)) * 1e-12 + 1e-12)
+                << "real at (" << i << ", " << j << ")";
+            EXPECT_NEAR(result(i, j).imag(), 0.0, 1e-12)
+                << "imag at (" << i << ", " << j << ")";
+        }
+    }
+}
+
+// A dimension mismatch must return empty rather than reading past the operand:
+// the H2D copy sizes are computed from A.cols(), so an unguarded call copies
+// sizeof(T)*K*N bytes out of a buffer holding only B.rows()*N.
+TEST_F(CudaKernelTest, MatrixGEMMDimensionMismatchReturnsEmpty) {
+    Eigen::MatrixXf af = Eigen::MatrixXf::Random(GEMM_M, GEMM_K);
+    Eigen::MatrixXd ad = Eigen::MatrixXd::Random(GEMM_M, GEMM_K);
+    Eigen::MatrixXcf ac = Eigen::MatrixXcf::Random(GEMM_M, GEMM_K);
+    Eigen::MatrixXcd az = Eigen::MatrixXcd::Random(GEMM_M, GEMM_K);
+
+    EXPECT_EQ(optmath::cuda::cuda_gemm(
+                  af, Eigen::MatrixXf::Random(GEMM_K + 3, GEMM_N)).size(), 0);
+    EXPECT_EQ(optmath::cuda::cuda_gemm(
+                  ad, Eigen::MatrixXd::Random(GEMM_K + 3, GEMM_N)).size(), 0);
+    EXPECT_EQ(optmath::cuda::cuda_gemm(
+                  ac, Eigen::MatrixXcf::Random(GEMM_K + 3, GEMM_N)).size(), 0);
+    EXPECT_EQ(optmath::cuda::cuda_gemm(
+                  az, Eigen::MatrixXcd::Random(GEMM_K + 3, GEMM_N)).size(), 0);
+
+    EXPECT_EQ(optmath::cuda::cuda_gemv(
+                  af, Eigen::VectorXf::Random(GEMM_K + 3)).size(), 0);
+    EXPECT_EQ(optmath::cuda::cuda_gemv(
+                  ad, Eigen::VectorXd::Random(GEMM_K + 3)).size(), 0);
+}
+
+// The transA/transB flags select the leading dimensions inside
+// cuda_mat_mul_f64 (lda = transA ? K : M, ldb = transB ? N : K). Getting either
+// wrong still produces a correctly-shaped matrix full of plausible numbers, so
+// only an explicit check against Eigen catches it. All four flag combinations
+// are exercised; the operands are non-square so a swapped lda/ldb cannot happen
+// to be valid. This is also the only direct test of the raw-pointer API --
+// everything else goes through the Eigen wrappers.
+TEST_F(CudaKernelTest, MatMulF64RawTransposeFlags) {
+    struct Case { bool transA, transB; };
+    const Case cases[] = {{false,false},{true,false},{false,true},{true,true}};
+
+    for (const Case& c : cases) {
+        // op(A) is M x K and op(B) is K x N, so the stored operands are
+        // transposed relative to that when the corresponding flag is set.
+        const int Ar = c.transA ? GEMM_K : GEMM_M;
+        const int Ac = c.transA ? GEMM_M : GEMM_K;
+        const int Br = c.transB ? GEMM_N : GEMM_K;
+        const int Bc = c.transB ? GEMM_K : GEMM_N;
+
+        Eigen::MatrixXd A = Eigen::MatrixXd::Random(Ar, Ac);
+        Eigen::MatrixXd B = Eigen::MatrixXd::Random(Br, Bc);
+        Eigen::MatrixXd opA = c.transA ? Eigen::MatrixXd(A.transpose()) : A;
+        Eigen::MatrixXd opB = c.transB ? Eigen::MatrixXd(B.transpose()) : B;
+        Eigen::MatrixXd expected = opA * opB;
+
+        double *dA = nullptr, *dB = nullptr, *dC = nullptr;
+        ASSERT_EQ(cudaMalloc(&dA, sizeof(double) * Ar * Ac), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&dB, sizeof(double) * Br * Bc), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&dC, sizeof(double) * GEMM_M * GEMM_N), cudaSuccess);
+        ASSERT_EQ(cudaMemcpy(dA, A.data(), sizeof(double) * Ar * Ac,
+                             cudaMemcpyHostToDevice), cudaSuccess);
+        ASSERT_EQ(cudaMemcpy(dB, B.data(), sizeof(double) * Br * Bc,
+                             cudaMemcpyHostToDevice), cudaSuccess);
+
+        const bool ok = optmath::cuda::cuda_mat_mul_f64(
+            dC, dA, dB, GEMM_M, GEMM_N, GEMM_K, c.transA, c.transB);
+        EXPECT_TRUE(ok) << "transA=" << c.transA << " transB=" << c.transB;
+
+        Eigen::MatrixXd result(GEMM_M, GEMM_N);
+        if (ok) {
+            ASSERT_EQ(cudaMemcpy(result.data(), dC,
+                                 sizeof(double) * GEMM_M * GEMM_N,
+                                 cudaMemcpyDeviceToHost), cudaSuccess);
+            for (int i = 0; i < GEMM_M; ++i) {
+                for (int j = 0; j < GEMM_N; ++j) {
+                    ASSERT_NEAR(result(i, j), expected(i, j),
+                                std::abs(expected(i, j)) * 1e-12 + 1e-12)
+                        << "transA=" << c.transA << " transB=" << c.transB
+                        << " at (" << i << ", " << j << ")";
+                }
+            }
+        }
+        cudaFree(dA); cudaFree(dB); cudaFree(dC);
     }
 }
 

@@ -162,9 +162,12 @@ static void neon_row_swap_f32(float* A, std::size_t lda, std::size_t n_cols,
 
 // Forward substitution: solve L*x = b (L lower triangular, non-unit diagonal)
 // b is overwritten with x
-void neon_trsv_lower_f32(float* b, const float* L, std::size_t n, std::size_t ldl) {
+// Returns 0, or the 1-based index of the zero diagonal that stopped it. On a
+// non-zero return b holds a partially substituted vector, NOT a solution --
+// previously this was a bare `return` with no way for the caller to tell.
+int neon_trsv_lower_f32(float* b, const float* L, std::size_t n, std::size_t ldl) {
     for (std::size_t j = 0; j < n; ++j) {
-        if (L[j + j * ldl] == 0.0f) return; // singular
+        if (L[j + j * ldl] == 0.0f) return static_cast<int>(j + 1);
         b[j] /= L[j + j * ldl];
         float scale = -b[j];
         std::size_t rem = n - j - 1;
@@ -172,14 +175,15 @@ void neon_trsv_lower_f32(float* b, const float* L, std::size_t n, std::size_t ld
             neon_axpy_f32(b + j + 1, L + j + 1 + j * ldl, scale, rem);
         }
     }
+    return 0;
 }
 
 // Backward substitution: solve U*x = b (U upper triangular)
 // b is overwritten with x
-void neon_trsv_upper_f32(float* b, const float* U, std::size_t n, std::size_t ldu) {
+int neon_trsv_upper_f32(float* b, const float* U, std::size_t n, std::size_t ldu) {
     for (std::size_t jj = n; jj > 0; --jj) {
         std::size_t j = jj - 1;
-        if (U[j + j * ldu] == 0.0f) return; // singular
+        if (U[j + j * ldu] == 0.0f) return static_cast<int>(j + 1);
         b[j] /= U[j + j * ldu];
         float scale = -b[j];
         if (j > 0) {
@@ -187,10 +191,11 @@ void neon_trsv_upper_f32(float* b, const float* U, std::size_t n, std::size_t ld
             neon_axpy_f32(b, U + j * ldu, scale, j);
         }
     }
+    return 0;
 }
 
 // Forward substitution with unit diagonal: solve L*x = b where diag(L) = 1
-void neon_trsv_lower_unit_f32(float* b, const float* L, std::size_t n, std::size_t ldl) {
+int neon_trsv_lower_unit_f32(float* b, const float* L, std::size_t n, std::size_t ldl) {
     for (std::size_t j = 0; j < n; ++j) {
         // diagonal is 1, no division needed
         float scale = -b[j];
@@ -199,10 +204,11 @@ void neon_trsv_lower_unit_f32(float* b, const float* L, std::size_t n, std::size
             neon_axpy_f32(b + j + 1, L + j + 1 + j * ldl, scale, rem);
         }
     }
+    return 0;
 }
 
 // Solve L^T * x = b using lower triangular L (backward sub on transpose)
-void neon_trsv_lower_trans_f32(float* b, const float* L, std::size_t n, std::size_t ldl) {
+int neon_trsv_lower_trans_f32(float* b, const float* L, std::size_t n, std::size_t ldl) {
     for (std::size_t jj = n; jj > 0; --jj) {
         std::size_t j = jj - 1;
         // b[j] -= dot(L[j+1:n, j], b[j+1:n])  -- but that's a column of L
@@ -213,9 +219,10 @@ void neon_trsv_lower_trans_f32(float* b, const float* L, std::size_t n, std::siz
         if (rem > 0) {
             sum = neon_dot_f32(L + j + 1 + j * ldl, b + j + 1, rem);
         }
-        if (L[j + j * ldl] == 0.0f) return; // singular
+        if (L[j + j * ldl] == 0.0f) return static_cast<int>(j + 1);
         b[j] = (b[j] - sum) / L[j + j * ldl];
     }
+    return 0;
 }
 
 // =========================================================================
@@ -350,8 +357,10 @@ void neon_qr_f32(float* A, float* tau, std::size_t m, std::size_t n, std::size_t
         std::size_t len = m - j;
         float* col = A + j + j * lda;
 
-        float norm = neon_dot_f32(col, col, len);
-        norm = std::sqrt(norm);
+        // Scaled norm: sqrt(dot(col,col)) overflowed to Inf for large columns
+        // and flushed to 0 for tiny ones, and a spurious norm == 0 below
+        // silently skips a reflector that should have been applied.
+        float norm = neon_norm_f32(col, len);
 
         if (norm == 0.0f) {
             tau[j] = 0.0f;
@@ -515,10 +524,9 @@ int neon_solve_f32(float* A, float* b, std::size_t n, std::size_t lda) {
     // Forward substitution with unit-diagonal L
     neon_trsv_lower_unit_f32(b, A, n, lda);
 
-    // Backward substitution with U
-    neon_trsv_upper_f32(b, A, n, lda);
-
-    return 0;
+    // Backward substitution with U -- propagate a zero pivot rather than
+    // returning a half-substituted vector that looks like a solution.
+    return neon_trsv_upper_f32(b, A, n, lda);
 }
 
 // =========================================================================
@@ -530,12 +538,11 @@ int neon_solve_spd_f32(float* A, float* b, std::size_t n, std::size_t lda) {
     if (info != 0) return info;
 
     // Solve L * y = b
-    neon_trsv_lower_f32(b, A, n, lda);
+    info = neon_trsv_lower_f32(b, A, n, lda);
+    if (info != 0) return info;
 
     // Solve L^T * x = y
-    neon_trsv_lower_trans_f32(b, A, n, lda);
-
-    return 0;
+    return neon_trsv_lower_trans_f32(b, A, n, lda);
 }
 
 // =========================================================================
@@ -609,7 +616,11 @@ std::pair<Eigen::MatrixXf, Eigen::VectorXi> neon_lu(const Eigen::MatrixXf& A) {
     Eigen::MatrixXf LU = A;
     Eigen::VectorXi piv(m);
 
-    neon_lu_f32(LU.data(), piv.data(), m, n, static_cast<std::size_t>(LU.outerStride()));
+    // Singular input: return empty so the caller cannot mistake a partial
+    // factorisation for a valid one.
+    if (neon_lu_f32(LU.data(), piv.data(), m, n,
+                    static_cast<std::size_t>(LU.outerStride())) != 0)
+        return {Eigen::MatrixXf(), Eigen::VectorXi()};
     return {LU, piv};
 }
 
@@ -664,7 +675,11 @@ Eigen::VectorXf neon_solve(const Eigen::MatrixXf& A, const Eigen::VectorXf& b) {
     std::size_t n = static_cast<std::size_t>(A.rows());
     Eigen::MatrixXf Acopy = A;
     Eigen::VectorXf x = b;
-    neon_solve_f32(Acopy.data(), x.data(), n, static_cast<std::size_t>(Acopy.outerStride()));
+    // Discarding this status returned a permuted, half-substituted b that looks
+    // like a solution. Empty vector on failure, matching neon_cholesky/inverse.
+    if (neon_solve_f32(Acopy.data(), x.data(), n,
+                       static_cast<std::size_t>(Acopy.outerStride())) != 0)
+        return Eigen::VectorXf();
     return x;
 }
 
@@ -672,7 +687,9 @@ Eigen::VectorXf neon_solve_spd(const Eigen::MatrixXf& A, const Eigen::VectorXf& 
     std::size_t n = static_cast<std::size_t>(A.rows());
     Eigen::MatrixXf Acopy = A;
     Eigen::VectorXf x = b;
-    neon_solve_spd_f32(Acopy.data(), x.data(), n, static_cast<std::size_t>(Acopy.outerStride()));
+    if (neon_solve_spd_f32(Acopy.data(), x.data(), n,
+                           static_cast<std::size_t>(Acopy.outerStride())) != 0)
+        return Eigen::VectorXf();
     return x;
 }
 

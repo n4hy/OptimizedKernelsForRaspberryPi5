@@ -22,6 +22,7 @@ While remaining compatible with standard Linux x86/ARM environments.
 
 - [Key Applications](#key-applications)
 - [Features](#features)
+  - [Double precision and complex GEMM](#double-precision-and-complex-gemm)
 - [Hardware Support](#hardware-support)
   - [Orange Pi 6 Plus (CIX P1)](#orange-pi-6-plus-cix-p1)
   - [Raspberry Pi 5](#raspberry-pi-5)
@@ -83,7 +84,8 @@ project, providing hardware-accelerated kernels for:
 - **Multi-Core Threading (OpenMP)**: The hot GEMM, 2D convolution, CAF, CFAR, MTI, and Doppler-FFT kernels parallelize across all 4 Cortex-A76 cores via OpenMP (guarded with `#ifdef _OPENMP`, so a build without OpenMP still compiles single-threaded).
 - **Int8 Dot-Product (SDOT)**: Armv8.2 `vdotq_s32` int8 GEMM with int32 accumulation — roughly **13× the fp32 GEMM** on the Pi 5's Cortex-A76.
 - **Vulkan Compute**: GPU offload to the VideoCore VII (V3D) on the Pi 5, with automatic **CPU/GPU offload thresholds** — small/memory-bound work stays on the (faster) 4× A76 CPU; only large, compute-heavy problems go to the GPU. Supports large vector operations, matrix math, FFT (Radix-2/4), and reductions.
-- **Eigen Integration**: Fully compatible with `Eigen::VectorXf`, `Eigen::MatrixXf`, and `Eigen::VectorXcf`. Pass your existing data structures directly to accelerated kernels.
+- **Eigen Integration**: Fully compatible with `Eigen::VectorXf` / `VectorXd`, `Eigen::MatrixXf` / `MatrixXd`, and `Eigen::VectorXcf` / `VectorXcd` (plus `MatrixXcf` / `MatrixXcd` GEMM). Pass your existing data structures directly to accelerated kernels.
+- **FP64 / complex GEMM**: Double-precision real GEMM, SPD Cholesky solve, and complex-f32/f64 GEMM on NEON (`float64x2_t` when compiled with `OPTMATH_USE_NEON`) and on CUDA (`cublasDgemm` / `cublasCgemm` / `cublasZgemm`). Eigen fallback on hosts without those backends. See [Double precision and complex GEMM](#double-precision-and-complex-gemm).
 - **Easy Integration**: Standard CMake package that installs to `/usr/local` and works with `find_package(OptMathKernels)`.
 
 ### Radar Signal Processing (`optmath::radar`)
@@ -98,8 +100,8 @@ project, providing hardware-accelerated kernels for:
 ### Optimized Kernels (`optmath::neon`)
 
 - **Vectorized Transcendentals**: Fast NEON-accelerated exp, sin, cos, sigmoid, tanh (~10-50x faster than scalar)
-- **Complex Operations**: Vectorized complex multiply, conjugate multiply, magnitude, phase
-- **Cache-Blocked GEMM**: 8x8 register-blocked microkernel with runtime cache blocking (MC/KC/NC auto-tuned for the detected L2/L3 sizes — the Pi 5's B-panel is sized to ~½ of L2), threaded across cores. The public `neon_gemm` routes to this path for non-trivial sizes.
+- **Complex Operations**: Vectorized complex multiply, conjugate multiply, magnitude, phase (`float` in `neon_complex.cpp`; `double` in `neon_fp64.cpp`)
+- **Cache-Blocked GEMM**: 8x8 register-blocked microkernel with runtime cache blocking (MC/KC/NC auto-tuned for the detected L2/L3 sizes — the Pi 5's B-panel is sized to ~½ of L2), threaded across cores. The public `neon_gemm` routes to this path for non-trivial sizes. `neon_gemm(MatrixXd, MatrixXd)` is a separate double-precision overload (`neon_fp64.cpp`), not the fp32 blocked microkernel.
 - **Reductions**: Sum, max, min, dot product with horizontal NEON adds
 
 ### SVE2 Acceleration (`optmath::sve2`)
@@ -133,6 +135,28 @@ project, providing hardware-accelerated kernels for:
 - **LU Decomposition**: Partial pivoting with NEON-vectorized column scaling and rank-1 trailing updates
 - **QR Decomposition**: Householder reflections with NEON-vectorized reflector application, explicit Q extraction
 - **Solvers**: General solve (LU), SPD solve (Cholesky), matrix inverse (LU + TRSM)
+- **FP64 overloads**: `neon_gemm` / `neon_mat_vec_mul` / `neon_cholesky` / `neon_solve_spd` / `neon_inverse` on `Eigen::MatrixXd` (`include/optmath/fp64_complex.hpp`, `src/neon/neon_fp64.cpp`). Inner loops use `float64x2_t` under `OPTMATH_USE_NEON`; otherwise Eigen. Cholesky / TRSV / inverse stay Eigen LLT / FullPivLU even on ARM — they are numerical-contract wrappers, not a new blocked algorithm.
+
+### Double precision and complex GEMM
+
+These overloads exist so NLF `dp_*` filters and complex radar GEMM can call the same OptMath names used for fp32. They are **not** a drop-in replacement for the cache-blocked fp32 `neon_gemm` microkernel.
+
+| API | Backend | What it actually runs | Status |
+|---|---|---|---|
+| `optmath::neon::neon_gemm(MatrixXd, MatrixXd)` | NEON `vfmaq_f64` 2-wide, else Eigen | Column-wise blocked-by-K rank-1; **not** the fp32 8×8 Goto kernel | *computed* vs Eigen to 1e-12 in `test_fp64_kernels` |
+| `optmath::neon::neon_mat_vec_mul(MatrixXd, VectorXd)` | NEON `vfmaq_f64`, else Eigen | GEMV | *computed* vs Eigen to 1e-12 |
+| `optmath::neon::neon_cholesky` / `neon_solve_spd` / `neon_inverse` (`MatrixXd`) | Eigen LLT / FullPivLU | Same numerical contract on every host | *computed* vs `L L^T` / `A x = b` to 1e-12 |
+| `optmath::neon::neon_complex_mul` / `dot` / `magnitude` (`VectorXcd`) | NEON `float64x2_t` mul, else scalar | `dot` is `conj(a)·b`, matching Eigen `a.dot(b)` | *computed* vs Eigen to 1e-12 in `test_complex_f64` |
+| `optmath::neon::neon_complex_gemm(MatrixXcf)` / `(MatrixXcd)` | Eigen `noalias() = A * B` | **No** NEON/CUDA inside this wrapper | *computed* vs Eigen (1e-5f / 1e-12) |
+| `optmath::cuda::cuda_mat_mul(MatrixXd)` | `cublasDgemm` | Column-major Eigen layout | *computed* vs Eigen to 1e-12 when CUDA is up |
+| `optmath::cuda::cuda_mat_mul(MatrixXcf)` | `cublasCgemm` | Same | *computed* vs Eigen; gate **5e-4** (cuBLAS Cgemm vs Eigen, not 1e-5) |
+| `optmath::cuda::cuda_mat_mul(MatrixXcd)` | `cublasZgemm` | Same | *computed* vs Eigen to 1e-12 |
+| `optmath::cuda::cuda_mat_vec_mul(MatrixXd, VectorXd)` | `cublasDgemv` | Same | *computed* vs Eigen to 1e-12 |
+| `optmath::cuda::cuda_gemm` / `cuda_gemv` | aliases of the above | — | — |
+
+**What this is not.** Filter-sized products (UKF / EKF `n ≲ 20`) should keep using Eigen stack `noalias()` products. These wrappers exist for dynamic `MatrixXd` and radar-sized GEMM. CUDA Cgemm vs Eigen is allowed a looser float gate than CPU because the vendor path is not bit-identical to Eigen.
+
+**Headers / tests.** `#include <optmath/neon_kernels.hpp>` pulls `fp64_complex.hpp`. CUDA overloads live in `cuda_backend.hpp` / `cuda_kernels.cu`. CTest: `test_fp64_kernels`, `test_complex_f64`.
 
 ### Quantized Kernels (`optmath::neon`)
 
@@ -151,7 +175,7 @@ project, providing hardware-accelerated kernels for:
 
 ### NVIDIA CUDA Acceleration (`optmath::cuda`)
 
-- **cuBLAS Integration**: Level 1, 2, and 3 BLAS operations with Tensor Core support
+- **cuBLAS Integration**: Level 1, 2, and 3 BLAS operations with Tensor Core support. Eigen overloads: `cuda_mat_mul` on `MatrixXf` (`Sgemm`), `MatrixXd` (`Dgemm`), `MatrixXcf` (`Cgemm`), `MatrixXcd` (`Zgemm`); `cuda_mat_vec_mul` on `VectorXf` / `VectorXd`.
 - **cuFFT**: High-performance FFT up to 64M points, batched transforms
 - **cuSOLVER**: Cholesky, LU, QR, SVD, eigenvalue decomposition
 - **Tensor Cores**: Automatic acceleration on Volta+ (SM 7.0+) and Ampere+ (SM 8.0+)
@@ -647,13 +671,15 @@ For complete API documentation of all **473 functions**, see:
 ### Headers
 
 ```cpp
-#include <optmath/neon_kernels.hpp>    // ARM NEON operations (GEMM, DSP, linalg, biquad-x4)
+#include <optmath/neon_kernels.hpp>    // ARM NEON operations (GEMM, DSP, linalg, biquad-x4);
+                                       // also pulls fp64_complex.hpp (MatrixXd / VectorXcd)
+#include <optmath/fp64_complex.hpp>    // Double-precision real + complex-f64 API (optional direct include)
 #include <optmath/neon_int8.hpp>       // Int8 SDOT GEMM + int8 conv2d
 #include <optmath/neon_fp16.hpp>       // FP16 elementwise ops
 #include <optmath/sve2_kernels.hpp>    // ARM SVE2/FCMA/I8MM operations
 #include <optmath/platform.hpp>        // CPU detection, thread affinity
 #include <optmath/vulkan_backend.hpp>  // Vulkan GPU compute
-#include <optmath/cuda_backend.hpp>    // NVIDIA CUDA operations
+#include <optmath/cuda_backend.hpp>    // NVIDIA CUDA operations (S/D/C/Z GEMM overloads)
 #include <optmath/radar_kernels.hpp>   // Radar signal processing
 ```
 
@@ -771,6 +797,46 @@ std::complex<float> dot = optmath::neon::neon_complex_dot(a, b);
 Eigen::VectorXf mag = optmath::neon::neon_complex_magnitude(a);
 Eigen::VectorXf phase = optmath::neon::neon_complex_phase(a);
 ```
+
+### Double-precision and complex GEMM
+
+```cpp
+#include <optmath/neon_kernels.hpp>
+#ifdef OPTMATH_USE_CUDA
+#include <optmath/cuda_backend.hpp>
+#endif
+
+Eigen::MatrixXd A = Eigen::MatrixXd::Random(5, 4);
+Eigen::MatrixXd B = Eigen::MatrixXd::Random(4, 3);
+Eigen::MatrixXd C = optmath::neon::neon_gemm(A, B);          // NEON f64 or Eigen
+Eigen::VectorXd y = optmath::neon::neon_mat_vec_mul(A, B.col(0));
+
+Eigen::MatrixXd S = Eigen::MatrixXd::Identity(4, 4) * 2.0;
+S(0, 1) = S(1, 0) = 0.3;
+Eigen::MatrixXd L = optmath::neon::neon_cholesky(S);         // Eigen LLT
+Eigen::VectorXd x = optmath::neon::neon_solve_spd(S, y.head(4));
+
+Eigen::VectorXcd u = Eigen::VectorXcd::Random(8);
+Eigen::VectorXcd v = Eigen::VectorXcd::Random(8);
+auto p = optmath::neon::neon_complex_mul(u, v);              // elementwise
+std::complex<double> d = optmath::neon::neon_complex_dot(u, v); // conj(u)·v
+
+Eigen::MatrixXcd Ad = Eigen::MatrixXcd::Random(6, 5);
+Eigen::MatrixXcd Bd = Eigen::MatrixXcd::Random(5, 4);
+Eigen::MatrixXcd Cd = optmath::neon::neon_complex_gemm(Ad, Bd); // Eigen product
+
+#ifdef OPTMATH_USE_CUDA
+if (optmath::cuda::is_available()) {
+    Eigen::MatrixXd Cg = optmath::cuda::cuda_mat_mul(A, B);     // cublasDgemm
+    Eigen::MatrixXcf Af = Eigen::MatrixXcf::Random(6, 5);
+    Eigen::MatrixXcf Bf = Eigen::MatrixXcf::Random(5, 4);
+    Eigen::MatrixXcf Cf = optmath::cuda::cuda_mat_mul(Af, Bf);  // cublasCgemm
+    Eigen::MatrixXcd Cgd = optmath::cuda::cuda_mat_mul(Ad, Bd); // cublasZgemm
+}
+#endif
+```
+
+Relative residual gates used by the tests: real/complex **double** vs Eigen `< 1e-12`; complex **float** CPU `< 1e-5`; CUDA Cgemm vs Eigen `< 5e-4` (*computed*, not a proof of bit-identity).
 
 ### NEON DSP: Polyphase Resampler
 
@@ -1568,11 +1634,14 @@ nvidia-smi
 ```
 OptMathKernels/
 ├── include/optmath/
-│   ├── neon_kernels.hpp      # NEON API declarations (104 functions)
+│   ├── neon_kernels.hpp      # NEON API declarations (104 functions);
+│   │                         #   #includes fp64_complex.hpp
+│   ├── fp64_complex.hpp      # Double-precision real GEMM/Cholesky/GEMV and
+│   │                         #   complex-f64 mul/dot/magnitude + complex GEMM
 │   ├── sve2_kernels.hpp      # SVE2/FCMA/I8MM API declarations (46 functions)
 │   ├── platform.hpp          # Platform detection, thread affinity (10 functions)
 │   ├── vulkan_backend.hpp    # Vulkan API declarations (23 functions)
-│   ├── cuda_backend.hpp      # CUDA API declarations (242 functions)
+│   ├── cuda_backend.hpp      # CUDA API declarations (S/D/C/Z GEMM overloads)
 │   └── radar_kernels.hpp     # Radar processing API (48 functions)
 ├── src/
 │   ├── neon/                           # ARM NEON (128-bit SIMD) kernels
@@ -1593,8 +1662,10 @@ OptMathKernels/
 │   │   ├── neon_iir.cpp            # Biquad IIR DF2T, cascade, Bristow-Johnson design
 │   │   │                           #   (lowpass/highpass/bandpass/notch)
 │   │   ├── neon_conv2d.cpp         # General NxM, separable, unrolled 3x3 & 5x5 convolution
-│   │   └── neon_linalg.cpp         # TRSV/TRSM, Cholesky, LU (partial pivot), QR
-│   │                               #   (Householder), general/SPD solve, matrix inverse
+│   │   ├── neon_linalg.cpp         # TRSV/TRSM, Cholesky, LU (partial pivot), QR
+│   │   │                           #   (Householder), general/SPD solve, matrix inverse
+│   │   └── neon_fp64.cpp           # MatrixXd GEMM/GEMV (float64x2_t), complex-f64
+│   │                               #   mul/dot/magnitude; Cholesky/TRSV/inverse via Eigen
 │   ├── sve2/                           # ARM SVE2 (scalable vector) kernels
 │   │   ├── sve2_kernels.cpp        # Predicated vector ops (svwhilelt_b32 loops),
 │   │   │                           #   transcendentals (predicated Horner/Chebyshev),
@@ -1625,7 +1696,8 @@ OptMathKernels/
 │       │                           #   (__expf/__sinf/__cosf/__sincosf fast-math intrinsics),
 │       │                           #   activation functions (sigmoid/tanh/ReLU/GELU/softmax),
 │       │                           #   matrix ops (tiled transpose with bank-conflict padding),
-│       │                           #   cuBLAS (Sgemm/Sdot/Snrm2/Sgemv), CUB reductions
+│       │                           #   cuBLAS (Sgemm/Dgemm/Cgemm/Zgemm, Sdot/Snrm2,
+│       │                           #   Sgemv/Dgemv), CUB reductions
 │       │                           #   (DeviceReduce::Sum/Max/Min), cuSOLVER Cholesky
 │       │                           #   (Spotrf/Dpotrf/Spotrs, architecture-aware thresholds)
 │       ├── cuda_complex.cu         # Split-format complex arithmetic, warp-level dot product
@@ -1646,6 +1718,8 @@ OptMathKernels/
 │   ├── test_neon_iir.cpp           # Biquad IIR filter tests
 │   ├── test_neon_conv2d.cpp        # 2D convolution tests
 │   ├── test_neon_linalg.cpp        # Dense linear algebra tests (21 tests)
+│   ├── test_fp64_kernels.cpp       # MatrixXd GEMM/GEMV/Cholesky/SPD (+ CUDA Dgemm)
+│   ├── test_complex_f64.cpp        # VectorXcd mul/dot/mag + C/Z GEMM (+ CUDA C/Zgemm)
 │   ├── test_sve2_kernels.cpp       # SVE2 unit tests (18 tests)
 │   ├── test_platform.cpp           # Platform detection tests (9 tests)
 │   ├── test_vulkan_vector.cpp      # Vulkan vector tests
@@ -1679,6 +1753,15 @@ OptMathKernels/
 ---
 
 ## Recent Changes
+
+### Local (unreleased) — FP64 / complex GEMM
+
+Working-tree addition on this checkout. Not a tagged release.
+
+- **`include/optmath/fp64_complex.hpp` + `src/neon/neon_fp64.cpp`**: `neon_gemm` / `neon_mat_vec_mul` / `neon_cholesky` / `neon_solve_spd` / `neon_inverse` on `MatrixXd`; complex-f64 mul/dot/magnitude; `neon_complex_gemm` on `MatrixXcf` / `MatrixXcd` (Eigen product).
+- **CUDA**: `cuda_mat_mul` overloads for `MatrixXd` (`cublasDgemm`), `MatrixXcf` (`cublasCgemm`), `MatrixXcd` (`cublasZgemm`); `cuda_mat_vec_mul(MatrixXd)` via `cublasDgemv`; matching `cuda_gemm` / `cuda_gemv` aliases.
+- **Tests**: `test_fp64_kernels`, `test_complex_f64`. Double vs Eigen residual `< 1e-12`. CUDA Cgemm vs Eigen uses a `5e-4` float gate (*computed*, not bit-identical).
+- Filter-sized (`n ≲ 20`) products should still use Eigen stack multiplies. These wrappers are for dynamic `MatrixXd` and radar-sized GEMM.
 
 ### v0.6.0 - Pi 5 (Cortex-A76 / V3D) Optimization Pass (July 2026)
 
@@ -2096,7 +2179,12 @@ Every kernel source file now has a thorough header comment documenting all funct
 **TF32 Precision Handling:**
 
 - **MatrixGEMM test tolerance adjusted** for TF32 (TensorFloat-32) precision on Ampere+ GPUs
-- TF32 uses 19-bit mantissa vs FP32's 24-bit, allowing ~0.4% relative error
+- TF32 is 19 bits *in total* (1 sign + 8 exponent + 10 explicit mantissa, an 11-bit
+  significand) against FP32's 24-bit significand -- it is not a 19-bit mantissa.
+  Measured on an RTX 5090 (M=97, K=53, N=71, uniform random operands): max relative
+  error 2.2e-4 for `cublasSgemm` and 2.6e-4 for `cublasCgemm` with TF32 enabled,
+  versus 1.9e-7 and 2.6e-7 with `CUBLAS_DEFAULT_MATH`. FP64 (`cublasDgemm`,
+  `cublasZgemm`) is unaffected: 3.6e-15 and 8.2e-15.
 - Tolerance updated to 1% relative + 5e-3 absolute to account for accumulated rounding in GEMM
 
 **Test Results (x86-64 with RTX 5090, CUDA 13.0):**
